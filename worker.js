@@ -1,6 +1,6 @@
 /**
  * Cloudflare Worker: 广东高考英语听说考试 (COT) 命题与 Edge TTS 一体化网关
- * 引擎：DeepSeek-R1-Distill-32B + Microsoft Edge Neural TTS
+ * 增强特性：SSML 容错自动修复、微软真实错误回传、DeepSeek 广东考试命题
  */
 
 const TOKEN_REFRESH_BEFORE_EXPIRY = 3 * 60;
@@ -11,7 +11,6 @@ let tokenInfo = {
     expiredAt: null
 };
 
-// 实例内并发互斥单飞锁 (Single-Flight)
 let pendingTokenPromise = null;
 
 const OPENAI_VOICE_MAP = {
@@ -80,68 +79,40 @@ const HTML_PAGE = `
         * { margin: 0; padding: 0; box-sizing: border-box; }
         
         #bgOverlay {
-            position: fixed;
-            top: 0; left: 0; width: 100vw; height: 100vh;
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
             background-size: cover; background-position: center; background-repeat: no-repeat;
             z-index: -2; transition: opacity 0.5s ease-in-out;
         }
         #bgMask {
-            position: fixed;
-            top: 0; left: 0; width: 100vw; height: 100vh;
-            background: rgba(15, 23, 42, 0.08);
-            z-index: -1;
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+            background: rgba(15, 23, 42, 0.08); z-index: -1;
         }
         [data-theme="dark"] #bgMask { background: rgba(11, 15, 25, 0.45); }
 
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            color: var(--text-primary);
-            line-height: 1.6;
-            min-height: 100vh;
-            transition: color 0.25s ease;
+            color: var(--text-primary); line-height: 1.6; min-height: 100vh; transition: color 0.25s ease;
         }
 
         .float-theme-btn {
             position: fixed; top: 16px; right: 16px; z-index: 100;
-            background: var(--surface);
-            backdrop-filter: blur(16px) saturate(180%);
-            -webkit-backdrop-filter: blur(16px) saturate(180%);
-            border: 1px solid var(--border);
-            color: var(--text-secondary);
-            width: 38px; height: 38px; border-radius: 50%;
+            background: var(--surface); backdrop-filter: blur(16px) saturate(180%);
+            -webkit-backdrop-filter: blur(16px) saturate(180%); border: 1px solid var(--border);
+            color: var(--text-secondary); width: 38px; height: 38px; border-radius: 50%;
             cursor: pointer; display: flex; align-items: center; justify-content: center;
-            box-shadow: var(--shadow-sm);
-            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: var(--shadow-sm); transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
         }
-        .float-theme-btn:hover {
-            color: var(--primary);
-            border-color: var(--primary);
-            transform: scale(1.08);
-        }
+        .float-theme-btn:hover { color: var(--primary); border-color: var(--primary); transform: scale(1.08); }
 
-        .container {
-            max-width: 880px;
-            margin: 0 auto;
-            padding: 24px 16px 60px;
-        }
+        .container { max-width: 880px; margin: 0 auto; padding: 24px 16px 60px; }
 
-        .countdown-grid {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 12px;
-            margin-bottom: 20px;
-        }
+        .countdown-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
         @media (max-width: 640px) { .countdown-grid { grid-template-columns: 1fr; } }
 
         .countdown-card {
-            background: var(--surface);
-            backdrop-filter: blur(20px) saturate(180%);
-            -webkit-backdrop-filter: blur(20px) saturate(180%);
-            border: 1px solid var(--border);
-            border-radius: var(--radius-lg);
-            padding: 14px 12px;
-            text-align: center;
-            box-shadow: var(--shadow-sm);
+            background: var(--surface); backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%); border: 1px solid var(--border);
+            border-radius: var(--radius-lg); padding: 14px 12px; text-align: center; box-shadow: var(--shadow-sm);
         }
         .countdown-label { font-size: 0.76rem; font-weight: 700; color: var(--text-secondary); margin-bottom: 4px; }
         .countdown-percentage {
@@ -154,18 +125,12 @@ const HTML_PAGE = `
         }
 
         .main-card {
-            background: var(--surface);
-            backdrop-filter: blur(20px) saturate(180%);
-            -webkit-backdrop-filter: blur(20px) saturate(180%);
-            border-radius: var(--radius-xl);
-            box-shadow: var(--shadow-lg);
-            border: 1px solid var(--border);
-            padding: 24px;
+            background: var(--surface); backdrop-filter: blur(20px) saturate(180%);
+            -webkit-backdrop-filter: blur(20px) saturate(180%); border-radius: var(--radius-xl);
+            box-shadow: var(--shadow-lg); border: 1px solid var(--border); padding: 24px;
         }
         .form-group { margin-bottom: 18px; }
-        .form-label {
-            display: block; margin-bottom: 8px; font-weight: 700; font-size: 0.88rem; color: var(--text-primary);
-        }
+        .form-label { display: block; margin-bottom: 8px; font-weight: 700; font-size: 0.88rem; color: var(--text-primary); }
         .input-method-tabs {
             display: flex; gap: 6px; background: var(--surface-sub); padding: 4px;
             border-radius: var(--radius-lg); border: 1px solid var(--border);
@@ -178,27 +143,20 @@ const HTML_PAGE = `
         .tab-btn.active { background: var(--primary); color: #ffffff; box-shadow: var(--shadow-sm); }
 
         .form-textarea {
-            width: 100%; min-height: 140px; padding: 12px 14px;
-            border: 1.5px solid var(--border); border-radius: var(--radius-md);
-            font-size: 0.95rem; font-weight: 500; background: var(--surface-sub);
+            width: 100%; min-height: 140px; padding: 12px 14px; border: 1.5px solid var(--border);
+            border-radius: var(--radius-md); font-size: 0.95rem; font-weight: 500; background: var(--surface-sub);
             color: var(--text-primary); font-family: inherit; resize: vertical;
         }
-        .form-textarea.ssml-editor {
-            font-family: "JetBrains Mono", Consolas, monospace; font-size: 0.86rem; min-height: 220px;
-        }
+        .form-textarea.ssml-editor { font-family: "JetBrains Mono", Consolas, monospace; font-size: 0.86rem; min-height: 220px; }
         .form-textarea:focus, .form-select:focus {
-            outline: none; background: rgba(255, 255, 255, 0.45);
-            border-color: var(--border-focus); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
+            outline: none; background: rgba(255, 255, 255, 0.45); border-color: var(--border-focus);
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
         }
 
-        .controls-grid {
-            display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 14px; margin-bottom: 18px;
-        }
+        .controls-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 18px; }
         .form-select {
-            width: 100%; padding: 9px 12px; border: 1.5px solid var(--border);
-            border-radius: var(--radius-md); font-size: 0.88rem; font-weight: 600;
-            color: var(--text-primary); background: var(--surface-sub);
+            width: 100%; padding: 9px 12px; border: 1.5px solid var(--border); border-radius: var(--radius-md);
+            font-size: 0.88rem; font-weight: 600; color: var(--text-primary); background: var(--surface-sub);
         }
         .slider-label-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
         .slider-val { font-size: 0.82rem; color: var(--primary); font-weight: 700; }
@@ -215,10 +173,10 @@ const HTML_PAGE = `
         .ai-exam-desc { font-size: 0.76rem; color: var(--text-secondary); margin-top: 2px; }
 
         .btn-primary {
-            width: 100%; background: var(--primary); color: #ffffff; border: none;
-            padding: 13px; font-size: 0.96rem; font-weight: 700; border-radius: var(--radius-md);
-            cursor: pointer; transition: all 0.2s; display: flex; align-items: center;
-            justify-content: center; gap: 8px; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+            width: 100%; background: var(--primary); color: #ffffff; border: none; padding: 13px;
+            font-size: 0.96rem; font-weight: 700; border-radius: var(--radius-md); cursor: pointer;
+            transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 8px;
+            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
         }
         .btn-primary:hover:not(:disabled) { background: var(--primary-hover); transform: translateY(-1px); }
         .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
@@ -229,9 +187,9 @@ const HTML_PAGE = `
         }
         .audio-player { width: 100%; margin-bottom: 14px; display: block; }
         .btn-secondary {
-            background: #10b981; color: #ffffff; border: none; padding: 8px 16px;
-            border-radius: var(--radius-md); cursor: pointer; text-decoration: none;
-            display: inline-flex; align-items: center; gap: 8px; font-weight: 700; font-size: 0.84rem;
+            background: #10b981; color: #ffffff; border: none; padding: 8px 16px; border-radius: var(--radius-md);
+            cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 8px;
+            font-weight: 700; font-size: 0.84rem;
         }
 
         .exam-card {
@@ -243,8 +201,8 @@ const HTML_PAGE = `
             margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
         }
         .exam-badge {
-            background: rgba(37, 99, 235, 0.15); color: var(--primary); font-size: 0.74rem;
-            font-weight: 700; padding: 2px 8px; border-radius: 999px;
+            background: rgba(37, 99, 235, 0.15); color: var(--primary); font-size: 0.74rem; font-weight: 700;
+            padding: 2px 8px; border-radius: 999px;
         }
         .exam-body {
             background: var(--surface-sub); border-radius: var(--radius-md); padding: 14px;
@@ -253,32 +211,23 @@ const HTML_PAGE = `
         }
         .btn-copy {
             background: var(--surface); border: 1px solid var(--border); color: var(--text-primary);
-            padding: 5px 12px; font-size: 0.78rem; font-weight: 600; border-radius: var(--radius-sm);
-            cursor: pointer;
+            padding: 5px 12px; font-size: 0.78rem; font-weight: 600; border-radius: var(--radius-sm); cursor: pointer;
         }
         .btn-copy:hover { color: var(--primary); border-color: var(--primary); }
 
-        .answer-container {
-            margin-top: 16px; border-top: 1px dashed var(--border); padding-top: 14px;
-        }
+        .answer-container { margin-top: 16px; border-top: 1px dashed var(--border); padding-top: 14px; }
         .btn-toggle-answer {
-            width: 100%; background: var(--surface-sub); border: 1.5px solid var(--border);
-            color: var(--text-primary); padding: 10px 14px; border-radius: var(--radius-md);
-            font-size: 0.86rem; font-weight: 700; cursor: pointer; display: flex;
-            justify-content: space-between; align-items: center; transition: all 0.2s;
+            width: 100%; background: var(--surface-sub); border: 1.5px solid var(--border); color: var(--text-primary);
+            padding: 10px 14px; border-radius: var(--radius-md); font-size: 0.86rem; font-weight: 700;
+            cursor: pointer; display: flex; justify-content: space-between; align-items: center; transition: all 0.2s;
         }
-        .btn-toggle-answer:hover {
-            background: rgba(37, 99, 235, 0.1); border-color: var(--primary); color: var(--primary);
-        }
+        .btn-toggle-answer:hover { background: rgba(37, 99, 235, 0.1); border-color: var(--primary); color: var(--primary); }
         .answer-collapse-box { display: none; margin-top: 12px; }
-        .answer-body {
-            background: rgba(16, 185, 129, 0.05); border-color: rgba(16, 185, 129, 0.3);
-        }
+        .answer-body { background: rgba(16, 185, 129, 0.05); border-color: rgba(16, 185, 129, 0.3); }
 
         .loading-spinner {
-            width: 26px; height: 26px; border: 3px solid var(--border);
-            border-top: 3px solid var(--primary); border-radius: 50%;
-            animation: spin 0.8s linear infinite; margin: 10px auto;
+            width: 26px; height: 26px; border: 3px solid var(--border); border-top: 3px solid var(--primary);
+            border-radius: 50%; animation: spin 0.8s linear infinite; margin: 10px auto;
         }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
@@ -403,7 +352,6 @@ const HTML_PAGE = `
                 </div>
             </div>
 
-            <!-- 试题看板 -->
             <div id="examCard" class="exam-card">
                 <div class="exam-header">
                     <div style="display:flex; align-items:center; gap:8px;">
@@ -419,7 +367,6 @@ const HTML_PAGE = `
                 
                 <pre class="exam-body" id="examBody"></pre>
 
-                <!-- 答案与范文折叠保护区 -->
                 <div class="answer-container" id="answerContainer" style="display: none;">
                     <button type="button" class="btn-toggle-answer" id="toggleAnswerBtn">
                         <span>💡 查看参考答案、电脑答语与评分要点</span>
@@ -438,40 +385,57 @@ const HTML_PAGE = `
 
     <script>
         const DEFAULT_EXAM_SSML = \`<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">
+  <!-- 播报 Part B + 2秒停顿 -->
+  <voice name="en-US-GuyNeural">
+    <prosody rate="-20%">Part B</prosody>
+    <break time="2000ms" />
+  </voice>
+
   <!-- ========== Part B 角色扮演对话 ========== -->
   <voice name="en-US-GuyNeural">
-    <prosody rate="-20%">Hi Linda, I heard our school will hold a sports meeting next month.</prosody>
+    <prosody rate="-20%">Hi Anna, I am going to visit the city museum this Saturday morning.</prosody>
     <break time="450ms" />
   </voice>
 
   <voice name="en-US-JennyNeural">
-    <prosody rate="-20%">Yes, that’s right. Are you going to take part in any sports events?</prosody>
+    <prosody rate="-20%">Sounds wonderful. What can we see inside the city museum?</prosody>
     <break time="450ms" />
   </voice>
 
   <voice name="en-US-GuyNeural">
-    <prosody rate="-20%">Of course. I plan to join the 100-meter running race.</prosody>
+    <prosody rate="-20%">There are many old paintings and traditional hand‑made works on show.</prosody>
     <break time="450ms" />
   </voice>
 
   <voice name="en-US-JennyNeural">
-    <prosody rate="-20%">That’s cool! When will the school start the registration?</prosody>
+    <prosody rate="-20%">Do we need to buy tickets before we go there?</prosody>
     <break time="450ms" />
   </voice>
 
   <voice name="en-US-GuyNeural">
-    <prosody rate="-20%">The registration starts next Monday and lasts for three days.</prosody>
+    <prosody rate="-20%">Students can get free tickets with their student cards at the gate.</prosody>
     <break time="450ms" />
   </voice>
 
   <voice name="en-US-JennyNeural">
-    <prosody rate="-20%">Don’t forget to bring your student ID when you sign up for the race.</prosody>
+    <prosody rate="-20%">Remember to meet at the bus stop near our school at eight o’clock.</prosody>
     <break time="800ms" />
+  </voice>
+
+  <!-- B对话结束，5秒间隔 -->
+  <voice name="en-US-GuyNeural">
+    <break time="5000ms" />
+  </voice>
+
+  <!-- 播报 Part C + 2秒停顿 -->
+  <voice name="en-US-GuyNeural">
+    <prosody rate="-20%">Part C</prosody>
+    <break time="2000ms" />
   </voice>
 
   <!-- ========== Part C 故事复述独白（男声） ========== -->
   <voice name="en-US-GuyNeural">
-    <prosody rate="-20%">Tom is a hard-working middle school student. Last weekend, he planned to finish all his homework first. In the afternoon, he found his deskmate Lily was upset because she could not solve her math problems. Tom decided to help her patiently. They studied together for two hours, and Lily finally understood all the difficult points. Lily thanked Tom warmly. Tom felt very happy to help his classmate.</prosody>
+    <prosody rate="-20%">One sunny afternoon, Kate rode her bike home from school. On her way, she saw a small cat sitting beside the road. It looked scared and could not move. Kate got off her bike and checked the little cat carefully. She found its leg was hurt. Then Kate took the cat to an animal hospital. The doctor gave the cat some treatment. Several days later, the cat got well and found a new home.</prosody>
   </voice>
 </speak>\`;
 
@@ -602,7 +566,7 @@ const HTML_PAGE = `
                 examCard.style.display = 'none';
             }
 
-            // 1. 合成听力音频
+            // 1. 发起音频合成
             const audioTask = fetch('/v1/audio/speech', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -614,7 +578,11 @@ const HTML_PAGE = `
                     pitch: pitchInput.value + 'Hz'
                 })
             }).then(async res => {
-                if (!res.ok) throw new Error((await res.json()).error?.message || '音频合成失败');
+                if (!res.ok) {
+                    const errJson = await res.json().catch(() => ({}));
+                    const detailMsg = errJson.error?.details || errJson.error?.message || '音频合成失败 (HTTP ' + res.status + ')';
+                    throw new Error(detailMsg);
+                }
                 const blob = await res.blob();
                 const url = URL.createObjectURL(blob);
                 audioPlayer.src = url;
@@ -626,7 +594,7 @@ const HTML_PAGE = `
                 alert('音频生成异常: ' + err.message);
             });
 
-            // 2. DeepSeek 生成广东高考 COT 试卷
+            // 2. 发起 DeepSeek 试卷生成
             let examTask = Promise.resolve();
             if (enableExam) {
                 examTask = fetch('/api/generate-exam', {
@@ -720,7 +688,6 @@ async function handleRequest(request, env, ctx) {
                 });
             }
 
-            // 深度注入广东高考英语听说考试 (COT) 命题细则
             const systemPrompt = `你是一名精通广东省普通高考英语听说考试（Computerized Oral Test，简称 COT）命题规则与智能机评算法的权威命题专家。
 用户会提供一段 SSML 剧本或对话文本，通常包含：
 1. Part B 角色扮演材料（双人交替日常对话）
@@ -839,7 +806,6 @@ Part C 高分复述范文（全篇一般过去时）
                 temperature: 0.35
             });
 
-            // 过滤 DeepSeek-R1 的思考标签
             let rawOutput = (aiResponse.response || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 
             let examContent = rawOutput;
@@ -891,8 +857,13 @@ Part C 高分复述范文（全篇一般过去时）
                 ctx
             );
         } catch (error) {
-            return new Response(JSON.stringify({ error: { message: error.message || "服务内部异常" } }), {
-                status: 500,
+            return new Response(JSON.stringify({
+                error: {
+                    message: error.message || "服务内部异常",
+                    details: error.details || null
+                }
+            }), {
+                status: error.status || 500,
                 headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
             });
         }
@@ -967,6 +938,18 @@ async function getVoice(text, voiceName, rate, pitch, volume, style, outputForma
     });
 }
 
+// 核心修复函数：自动修复裸露在 <speak> 下的 <break>，并补齐 voice 标签
+function sanitizeSsml(ssmlText, defaultVoice = "en-US-GuyNeural") {
+    if (!ssmlText.trim().startsWith('<speak')) return ssmlText;
+
+    // 1. 将孤立在 </voice> 与 <voice 之间，或者紧随 <speak> 之后的裸露 <break ... /> 包裹一层 voice
+    let repaired = ssmlText.replace(/(<\/voice>|<speak[^>]*>)\s*(<break[^>]*\/>)\s*(<voice|<\/speak>)/gi, (match, p1, p2, p3) => {
+        return `${p1}\n  <voice name="${defaultVoice}">\n    ${p2}\n  </voice>\n  ${p3}`;
+    });
+
+    return repaired;
+}
+
 async function getAudioChunk(text, voiceName, rate, pitch, volume, style, outputFormat, maxRetries = 3, env, ctx) {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
@@ -980,7 +963,11 @@ async function getAudioChunk(text, voiceName, rate, pitch, volume, style, output
                 text = text.replace(m[0], '');
             }
 
-            const requestSsml = getSsml(text, voiceName, rate, pitch, volume, style, slien);
+            let requestSsml = getSsml(text, voiceName, rate, pitch, volume, style, slien);
+            
+            // 执行 SSML 语法容错自动修复
+            requestSsml = sanitizeSsml(requestSsml, voiceName);
+
             const response = await fetch(url, {
                 method: "POST",
                 headers: {
@@ -993,16 +980,20 @@ async function getAudioChunk(text, voiceName, rate, pitch, volume, style, output
             });
 
             if (!response.ok) {
+                const errorDetail = await response.text();
                 if (attempt < maxRetries && response.status >= 500) {
                     await delay(500 * (attempt + 1));
                     continue;
                 }
-                throw new Error(`Edge TTS 合成拒绝 (HTTP ${response.status})`);
+                const err = new Error(`Edge TTS 拒绝 (HTTP ${response.status})`);
+                err.status = response.status;
+                err.details = errorDetail;
+                throw err;
             }
 
             return await response.blob();
         } catch (e) {
-            if (attempt === maxRetries) throw e;
+            if (attempt === maxRetries || e.status === 400) throw e;
             await delay(500 * (attempt + 1));
         }
     }
