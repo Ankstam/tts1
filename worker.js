@@ -1,5 +1,5 @@
 /**
- * Cloudflare Worker: Edge TTS + Workers AI 听说考试出题一体化网关
+ * Cloudflare Worker: Edge TTS + DeepSeek 智能命题一体化网关
  */
 
 const TOKEN_REFRESH_BEFORE_EXPIRY = 3 * 60;
@@ -313,7 +313,6 @@ const HTML_PAGE = `
             cursor: pointer;
         }
 
-        /* 智能出题选项卡片 */
         .ai-exam-box {
             background: rgba(37, 99, 235, 0.08);
             border: 1px solid rgba(37, 99, 235, 0.3);
@@ -399,7 +398,6 @@ const HTML_PAGE = `
             background: #059669;
         }
 
-        /* AI 题目生成展示区 */
         .exam-card {
             margin-top: 20px;
             background: var(--surface);
@@ -432,7 +430,7 @@ const HTML_PAGE = `
             font-size: 0.88rem;
             line-height: 1.7;
             white-space: pre-wrap;
-            max-height: 380px;
+            max-height: 420px;
             overflow-y: auto;
             border: 1px solid var(--border);
         }
@@ -553,14 +551,13 @@ const HTML_PAGE = `
                     </div>
                 </div>
 
-                <!-- AI 智能出题选项开关 -->
                 <label class="ai-exam-box" for="aiExamToggle">
                     <div>
                         <div class="ai-exam-title">
-                            <span>✨</span> 开启 AI 智能听说命题 (人机对话逆向出题)
+                            <span>✨</span> 开启 DeepSeek 智能听说命题 (人机对话逆向出题)
                         </div>
                         <div class="ai-exam-desc">
-                            根据输入文本，同步生成中考/高考 Part B（三问五答）与 Part C（故事梗概与关键词）标准试题。
+                            基于 DeepSeek 驱动，精准提取上下文并按中高考听说标准格式生成 Part B (三问五答) 与 Part C。
                         </div>
                     </div>
                     <input type="checkbox" id="aiExamToggle" style="width: 20px; height: 20px; accent-color: var(--primary); cursor: pointer;" checked>
@@ -590,18 +587,17 @@ const HTML_PAGE = `
                 </div>
             </div>
 
-            <!-- AI 试题展示看板 -->
             <div id="examCard" class="exam-card">
                 <div class="exam-header">
                     <div style="display:flex; align-items:center; gap:8px;">
-                        <span style="font-weight:700; font-size:0.92rem;">📝 英语听说考试标准试卷</span>
-                        <span class="exam-badge" id="examBadge">AI 命题中...</span>
+                        <span style="font-weight:700; font-size:0.92rem;">📝 英语听说考试标准试卷 (DeepSeek 生成)</span>
+                        <span class="exam-badge" id="examBadge">DeepSeek 命题中...</span>
                     </div>
                     <button type="button" class="btn-copy" id="copyExamBtn">📋 复制试题</button>
                 </div>
                 <div id="examLoading" style="display:none; text-align:center; padding:18px 0;">
                     <div class="loading-spinner"></div>
-                    <div style="font-size:0.82rem; color:var(--text-secondary);">AI 正在深度解析对话逻辑与命题点...</div>
+                    <div style="font-size:0.82rem; color:var(--text-secondary);">DeepSeek 正在解析对话逻辑并组织命题点...</div>
                 </div>
                 <pre class="exam-body" id="examBody"></pre>
             </div>
@@ -649,11 +645,9 @@ const HTML_PAGE = `
 
         document.getElementById('ssmlInput').value = DEFAULT_EXAM_SSML;
 
-        // 壁纸加载
         const bg = document.getElementById('bgOverlay');
         if (bg) bg.style.backgroundImage = "url('/api/wallpaper?t=" + Date.now() + "')";
 
-        // 昼夜切换
         const themeToggle = document.getElementById('themeToggle');
         const themeIcon = document.getElementById('themeIcon');
         function applyTheme(theme) {
@@ -668,7 +662,6 @@ const HTML_PAGE = `
         };
         applyTheme(localStorage.getItem('tts_theme') || 'light');
 
-        // 倒计时
         function pad(n) { return n < 10 ? '0' + n : n; }
         function updateCountdowns() {
             const now = new Date();
@@ -676,19 +669,16 @@ const HTML_PAGE = `
             const nowMs = bjTime.getTime();
             const y = bjTime.getFullYear(), m = bjTime.getMonth(), d = bjTime.getDate();
 
-            // 今日
             const todayEnd = new Date(y, m, d + 1, 0, 0, 0).getTime();
             const remDay = Math.max(0, todayEnd - nowMs);
             document.getElementById('dayPercent').textContent = ((remDay / 86400000) * 100).toFixed(2) + '%';
             document.getElementById('dayExact').textContent = '剩余 ' + pad(Math.floor(remDay / 3600000)) + ':' + pad(Math.floor((remDay % 3600000) / 60000)) + ':' + pad(Math.floor((remDay % 60000) / 1000));
 
-            // 本年
             const yStart = new Date(y, 0, 1).getTime(), yEnd = new Date(y + 1, 0, 1).getTime();
             const remYear = Math.max(0, yEnd - nowMs);
             document.getElementById('yearPercent').textContent = ((remYear / (yEnd - yStart)) * 100).toFixed(2) + '%';
             document.getElementById('yearExact').textContent = '剩余 ' + Math.floor(remYear / 86400000) + '天';
 
-            // 高考 2028-06-07
             const gkTarget = new Date(2028, 5, 7, 9, 0, 0).getTime();
             const remGk = Math.max(0, gkTarget - nowMs);
             document.getElementById('gaokaoPercent').textContent = ((remGk / (gkTarget - new Date(2025, 8, 1).getTime())) * 100).toFixed(2) + '%';
@@ -697,7 +687,6 @@ const HTML_PAGE = `
         setInterval(updateCountdowns, 1000);
         updateCountdowns();
 
-        // 标签切换
         let activeTab = 'ssml';
         const textTab = document.getElementById('textTab');
         const ssmlTab = document.getElementById('ssmlTab');
@@ -720,14 +709,12 @@ const HTML_PAGE = `
         speedInput.oninput = function() { document.getElementById('speedVal').textContent = parseFloat(speedInput.value).toFixed(2) + 'x'; };
         pitchInput.oninput = function() { document.getElementById('pitchVal').textContent = (pitchInput.value >= 0 ? '+' : '') + pitchInput.value + 'Hz'; };
 
-        // 复制试题
         document.getElementById('copyExamBtn').onclick = function() {
             const content = document.getElementById('examBody').textContent;
             if (!content) return;
             navigator.clipboard.writeText(content).then(() => alert('试题已成功复制到剪贴板！'));
         };
 
-        // 核心表单提交逻辑（音频合成 + AI 出题并行）
         document.getElementById('ttsForm').onsubmit = async function(e) {
             e.preventDefault();
             const text = activeTab === 'text' ? document.getElementById('textInput').value : document.getElementById('ssmlInput').value;
@@ -758,12 +745,11 @@ const HTML_PAGE = `
                 examCard.style.display = 'block';
                 examLoading.style.display = 'block';
                 examBody.textContent = '';
-                examBadge.textContent = 'AI 命题中...';
+                examBadge.textContent = 'DeepSeek 命题中...';
             } else {
                 examCard.style.display = 'none';
             }
 
-            // 1. 发起音频合成任务
             const audioTask = fetch('/v1/audio/speech', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -787,7 +773,6 @@ const HTML_PAGE = `
                 alert('音频生成异常: ' + err.message);
             });
 
-            // 2. 发起 AI 试题生成任务（若开启）
             let examTask = Promise.resolve();
             if (enableExam) {
                 examTask = fetch('/api/generate-exam', {
@@ -811,7 +796,6 @@ const HTML_PAGE = `
                 });
             }
 
-            // 等待两者全部结束，恢复按钮
             await Promise.allSettled([audioTask, examTask]);
             generateBtn.disabled = false;
         };
@@ -861,7 +845,7 @@ async function handleRequest(request, env, ctx) {
         }
     }
 
-    // ==================== 核心新增：AI 听说考试试题生成 ====================
+    // ==================== DeepSeek AI 试题生成 ====================
     if (path === "/api/generate-exam") {
         if (!env.AI) {
             return new Response(JSON.stringify({
@@ -881,15 +865,12 @@ async function handleRequest(request, env, ctx) {
                 });
             }
 
-            // 清洗 SSML 获取纯对话与文本结构
-            const cleanText = text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-
             const systemPrompt = `你是一名资深的英语听说人机对话考试命题专家。
-用户会提供一段 SSML 剧本或对话文本（通常包含两部分：Part B 角色扮演对话，Part C 故事复述短文）。
+用户会提供一段 SSML 剧本或对话文本（包含两部分：Part B 角色扮演对话，Part C 故事复述短文）。
 请深入理解文本的上下文细节，严格按照中考/高考人机对话考试的规范格式进行命题。
 
 【输出规范】：
-严格按照以下格式输出，禁止包含任何引导语、多余的问候或分析：
+严格按照以下格式直接输出试题，禁止包含多余的问候、解释或前导说明：
 
 二、Part B 角色扮演 原题
 
@@ -922,22 +903,25 @@ async function handleRequest(request, env, ctx) {
 
 [列出5-7个核心考点英文单词或短语，用英文逗号分隔]`;
 
-            // 调用 Cloudflare Workers AI 原生大模型 (默认使用 Qwen/Llama 优质中英模型)
-            const aiResponse = await env.AI.run("@cf/qwen/qwen1.5-14b-chat-awq", {
+            // 调用 Cloudflare Workers AI 原生 DeepSeek 模型
+            const aiResponse = await env.AI.run("@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", {
                 messages: [
                     { role: "system", content: systemPrompt },
                     { role: "user", content: `请根据以下考试材料进行命题：\n\n${text}` }
                 ],
-                max_tokens: 1024,
-                temperature: 0.3
+                max_tokens: 2048,
+                temperature: 0.6
             });
 
-            return new Response(JSON.stringify({ result: aiResponse.response }), {
+            // 过滤 DeepSeek-R1 的思考标签，仅保留纯净试卷排版
+            let cleanResult = (aiResponse.response || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+
+            return new Response(JSON.stringify({ result: cleanResult }), {
                 headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
             });
         } catch (error) {
-            console.error("AI 命题失败:", error);
-            return new Response(JSON.stringify({ error: error.message || "AI 命题服务异常" }), {
+            console.error("DeepSeek 命题失败:", error);
+            return new Response(JSON.stringify({ error: error.message || "DeepSeek 服务异常" }), {
                 status: 500,
                 headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
             });
