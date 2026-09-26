@@ -1,12 +1,11 @@
 /**
  * Cloudflare Worker: 广东高考英语听说考试 (COT) 命题与 Edge TTS 一体化网关
- * 支持引擎：Cloudflare Workers AI (DeepSeek) + Groq 极速云 (GPT-OSS-120B / Qwen3.8 / GPT-OSS-20B)
+ * 升级特性：
+ * 1. 彻底解决 Edge TTS 裸露 break 与注释造成的 HTTP 400
+ * 2. 支持前端直接填入 Groq API Key 并保存在 localStorage，免去 GitHub 泄露作废风险
  */
 
 const TOKEN_REFRESH_BEFORE_EXPIRY = 3 * 60;
-
-// 配置 Groq 默认 API Key（亦支持在 CF 环境变量中设置 GROQ_API_KEY 覆盖）
-const DEFAULT_GROQ_API_KEY = "";
 
 let tokenInfo = {
     endpoint: null,
@@ -38,7 +37,6 @@ const FORMAT_MAP = {
     "mp3": "audio-24khz-160kbitrate-mono-mp3"
 };
 
-// 官方标准：广东省高考英语听说考试命题 System Prompt
 const DEFAULT_COT_SYSTEM_PROMPT = `你是一名精通广东省普通高考英语听说考试（Computerized Oral Test，简称 COT）命题规则与智能机评算法的权威命题专家。
 用户会提供一段 SSML 剧本或对话文本，通常包含：
 1. Part B 角色扮演材料（双人交替日常对话）
@@ -261,9 +259,14 @@ const HTML_PAGE = `
             color: var(--text-primary); font-family: inherit; resize: vertical;
         }
         .form-textarea.ssml-editor { font-family: "JetBrains Mono", Consolas, monospace; font-size: 0.86rem; min-height: 220px; }
-        .form-textarea:focus, .form-select:focus {
+        .form-textarea:focus, .form-select:focus, .form-input:focus {
             outline: none; background: rgba(255, 255, 255, 0.45); border-color: var(--border-focus);
             box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
+        }
+
+        .form-input {
+            width: 100%; padding: 9px 12px; border: 1.5px solid var(--border); border-radius: var(--radius-md);
+            font-size: 0.88rem; font-weight: 600; color: var(--text-primary); background: var(--surface-sub);
         }
 
         .controls-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 18px; }
@@ -275,7 +278,7 @@ const HTML_PAGE = `
         .slider-val { font-size: 0.82rem; color: var(--primary); font-weight: 700; }
         .form-range { width: 100%; accent-color: var(--primary); cursor: pointer; }
 
-        /* AI 命题配置大卡片 */
+        /* AI 命题配置面板 */
         .ai-exam-box {
             background: rgba(37, 99, 235, 0.08); border: 1.5px solid rgba(37, 99, 235, 0.3);
             border-radius: var(--radius-lg); padding: 14px 16px; margin-bottom: 18px;
@@ -480,6 +483,14 @@ const HTML_PAGE = `
                             </div>
                         </div>
 
+                        <!-- 网页端安全输入 Groq API Key -->
+                        <div id="groqKeyWrap">
+                            <label class="form-label" style="font-size:0.80rem; margin-bottom:4px;">
+                                Groq API Key (仅保存在本地浏览器，不经过 GitHub 代码库)
+                            </label>
+                            <input type="password" class="form-input" id="groqApiKeyInput" placeholder="输入在 console.groq.com 获取的 gsk_ 开头密钥...">
+                        </div>
+
                         <div>
                             <button type="button" class="prompt-accordion-btn" id="togglePromptBtn">
                                 <span>⚙️ 自定义指示词 (System Prompt) 展开编辑</span>
@@ -556,6 +567,13 @@ const HTML_PAGE = `
         const DEFAULT_SYSTEM_PROMPT = ${JSON.stringify(DEFAULT_COT_SYSTEM_PROMPT)};
         document.getElementById('customPromptInput').value = DEFAULT_SYSTEM_PROMPT;
 
+        // 本地读写 Groq API Key
+        const groqApiKeyInput = document.getElementById('groqApiKeyInput');
+        groqApiKeyInput.value = localStorage.getItem('user_groq_key') || '';
+        groqApiKeyInput.oninput = function() {
+            localStorage.setItem('user_groq_key', this.value.trim());
+        };
+
         const DEFAULT_EXAM_SSML = \`<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">
   <!-- 播报 Part B + 2秒停顿 -->
   <voice name="en-US-GuyNeural">
@@ -565,39 +583,37 @@ const HTML_PAGE = `
 
   <!-- ========== Part B 角色扮演对话 ========== -->
   <voice name="en-US-GuyNeural">
-    <prosody rate="-20%">Hi Anna, I am going to visit the city museum this Saturday morning.</prosody>
+    <prosody rate="-20%">Hi Emma, our English club will hold a speech competition next Friday.</prosody>
     <break time="450ms" />
   </voice>
 
   <voice name="en-US-JennyNeural">
-    <prosody rate="-20%">Sounds wonderful. What can we see inside the city museum?</prosody>
+    <prosody rate="-20%">That sounds fantastic. What is the theme of this speech competition?</prosody>
     <break time="450ms" />
   </voice>
 
   <voice name="en-US-GuyNeural">
-    <prosody rate="-20%">There are many old paintings and traditional hand‑made works on show.</prosody>
+    <prosody rate="-20%">The theme is the importance of reading in our daily life.</prosody>
     <break time="450ms" />
   </voice>
 
   <voice name="en-US-JennyNeural">
-    <prosody rate="-20%">Do we need to buy tickets before we go there?</prosody>
+    <prosody rate="-20%">How long should each student’s speech last?</prosody>
     <break time="450ms" />
   </voice>
 
   <voice name="en-US-GuyNeural">
-    <prosody rate="-20%">Students can get free tickets with their student cards at the gate.</prosody>
+    <prosody rate="-20%">Every speech should be kept within five minutes.</prosody>
     <break time="450ms" />
   </voice>
 
   <voice name="en-US-JennyNeural">
-    <prosody rate="-20%">Remember to meet at the bus stop near our school at eight o’clock.</prosody>
+    <prosody rate="-20%">Don’t forget to hand in your application form before this Wednesday afternoon.</prosody>
     <break time="800ms" />
   </voice>
 
   <!-- B对话结束，5秒间隔 -->
-  <voice name="en-US-GuyNeural">
-    <break time="5000ms" />
-  </voice>
+  <break time="5000ms" />
 
   <!-- 播报 Part C + 2秒停顿 -->
   <voice name="en-US-GuyNeural">
@@ -607,7 +623,7 @@ const HTML_PAGE = `
 
   <!-- ========== Part C 故事复述独白（男声） ========== -->
   <voice name="en-US-GuyNeural">
-    <prosody rate="-20%">One sunny afternoon, Kate rode her bike home from school. On her way, she saw a small cat sitting beside the road. It looked scared and could not move. Kate got off her bike and checked the little cat carefully. She found its leg was hurt. Then Kate took the cat to an animal hospital. The doctor gave the cat some treatment. Several days later, the cat got well and found a new home.</prosody>
+    <prosody rate="-20%">Last Sunday morning, Mike went to the park for a walk. He noticed a visitor leave his wallet on a bench. Mike picked it up and checked it. Inside the wallet there was some money and an ID card. Mike waited there for nearly one hour. Finally the worried man came back. Mike returned the wallet to him. The man thanked Mike again and again for his honesty.</prosody>
   </voice>
 </speak>\`;
 
@@ -656,7 +672,6 @@ const HTML_PAGE = `
         setInterval(updateCountdowns, 1000);
         updateCountdowns();
 
-        // 标签切换
         let activeTab = 'ssml';
         const textTab = document.getElementById('textTab');
         const ssmlTab = document.getElementById('ssmlTab');
@@ -679,14 +694,15 @@ const HTML_PAGE = `
         speedInput.oninput = function() { document.getElementById('speedVal').textContent = parseFloat(speedInput.value).toFixed(2) + 'x'; };
         pitchInput.oninput = function() { document.getElementById('pitchVal').textContent = (pitchInput.value >= 0 ? '+' : '') + pitchInput.value + 'Hz'; };
 
-        // 引擎与模型联动交互
         const aiProviderSelect = document.getElementById('aiProviderSelect');
         const groqModelWrap = document.getElementById('groqModelWrap');
+        const groqKeyWrap = document.getElementById('groqKeyWrap');
         aiProviderSelect.onchange = function() {
-            groqModelWrap.style.display = this.value === 'groq' ? 'block' : 'none';
+            const isGroq = this.value === 'groq';
+            groqModelWrap.style.display = isGroq ? 'block' : 'none';
+            groqKeyWrap.style.display = isGroq ? 'block' : 'none';
         };
 
-        // 指示词手风琴展开与重置
         const togglePromptBtn = document.getElementById('togglePromptBtn');
         const promptEditBox = document.getElementById('promptEditBox');
         togglePromptBtn.onclick = function() {
@@ -700,7 +716,6 @@ const HTML_PAGE = `
             alert('已恢复为官方预设的广东高考命题指示词！');
         };
 
-        // 复制按钮
         document.getElementById('copyExamBtn').onclick = function() {
             const content = document.getElementById('examBody').textContent;
             if (!content) return;
@@ -712,7 +727,6 @@ const HTML_PAGE = `
             navigator.clipboard.writeText(content).then(() => alert('参考答案已成功复制！'));
         };
 
-        // 答案折叠切换
         const toggleAnswerBtn = document.getElementById('toggleAnswerBtn');
         const answerCollapseBox = document.getElementById('answerCollapseBox');
         const answerToggleIcon = document.getElementById('answerToggleIcon');
@@ -722,7 +736,6 @@ const HTML_PAGE = `
             answerToggleIcon.textContent = isHidden ? '▲ 点击收起' : '▼ 点击展开';
         };
 
-        // 表单提交
         document.getElementById('ttsForm').onsubmit = async function(e) {
             e.preventDefault();
             const text = activeTab === 'text' ? document.getElementById('textInput').value : document.getElementById('ssmlInput').value;
@@ -792,12 +805,13 @@ const HTML_PAGE = `
                 alert('音频生成异常: ' + err.message);
             });
 
-            // 2. 发起 AI 试题与答案生成
+            // 2. 发起 AI 试题生成
             let examTask = Promise.resolve();
             if (enableExam) {
                 const provider = aiProviderSelect.value;
                 const model = document.getElementById('groqModelSelect').value;
                 const customPrompt = document.getElementById('customPromptInput').value.trim();
+                const clientApiKey = groqApiKeyInput.value.trim();
 
                 examTask = fetch('/api/generate-exam', {
                     method: 'POST',
@@ -806,6 +820,7 @@ const HTML_PAGE = `
                         text: text,
                         provider: provider,
                         model: model,
+                        apiKey: clientApiKey,
                         systemPrompt: customPrompt
                     })
                 }).then(async res => {
@@ -875,10 +890,9 @@ async function handleRequest(request, env, ctx) {
         }
     }
 
-    // ==================== 多渠道 (Groq / CF DeepSeek) 听说试题生成 ====================
     if (path === "/api/generate-exam") {
         try {
-            const { text, provider = "groq", model = "openai/gpt-oss-120b", systemPrompt } = await request.json();
+            const { text, provider = "groq", model = "openai/gpt-oss-120b", apiKey, systemPrompt } = await request.json();
             if (!text || !text.trim()) {
                 return new Response(JSON.stringify({ error: "文本内容不能为空" }), {
                     status: 400,
@@ -886,13 +900,21 @@ async function handleRequest(request, env, ctx) {
                 });
             }
 
-            // 指示词优先级：用户自定义（非空） > 官方预设默认指示词
             const finalPrompt = (systemPrompt && systemPrompt.trim()) ? systemPrompt.trim() : DEFAULT_COT_SYSTEM_PROMPT;
-
             let rawOutput = "";
 
             if (provider === "groq") {
-                const groqApiKey = env.GROQ_API_KEY || DEFAULT_GROQ_API_KEY;
+                // 优先从客户端传入的 Key 读取，次级从环境变量读取
+                const groqApiKey = apiKey || env.GROQ_API_KEY;
+                if (!groqApiKey) {
+                    return new Response(JSON.stringify({
+                        error: "未提供 Groq API Key。请在前端配置面板中输入您的有效 Key"
+                    }), {
+                        status: 400,
+                        headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
+                    });
+                }
+
                 const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
                     method: "POST",
                     headers: {
@@ -918,7 +940,6 @@ async function handleRequest(request, env, ctx) {
                 const groqData = await groqRes.json();
                 rawOutput = (groqData.choices?.[0]?.message?.content || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
             } else {
-                // Cloudflare Workers AI 原生推理 (DeepSeek-R1-32B)
                 if (!env.AI) {
                     return new Response(JSON.stringify({
                         error: "未在 wrangler.toml 中绑定 Workers AI。请配置 [ai] binding = 'AI' 或切换为 Groq 引擎"
@@ -940,7 +961,6 @@ async function handleRequest(request, env, ctx) {
                 rawOutput = (aiResponse.response || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
             }
 
-            // 结构化提取原题与参考答案
             let examContent = rawOutput;
             let answerContent = "";
 
@@ -1071,14 +1091,23 @@ async function getVoice(text, voiceName, rate, pitch, volume, style, outputForma
     });
 }
 
+// 深度健壮 SSML 净化函数：清除全部注释，并将裸露在 voice 外部的 break 自动包装
 function sanitizeSsml(ssmlText, defaultVoice = "en-US-GuyNeural") {
-    if (!ssmlText.trim().startsWith('<speak')) return ssmlText;
+    if (!ssmlText || !ssmlText.trim().startsWith('<speak')) return ssmlText;
 
-    let repaired = ssmlText.replace(/(<\/voice>|<speak[^>]*>)\s*(<break[^>]*\/>)\s*(<voice|<\/speak>)/gi, (match, p1, p2, p3) => {
-        return `${p1}\n  <voice name="${defaultVoice}">\n    ${p2}\n  </voice>\n  ${p3}`;
+    // 1. 清除所有 XML 注释，避免注释截断正则或引起解析混乱
+    let cleaned = ssmlText.replace(/<!--[\s\S]*?-->/g, '');
+
+    // 2. 识别所有游离在 </voice> 与 <voice> 之间、或 <speak> 与第一个 <voice> 之间的 <break>
+    cleaned = cleaned.replace(/(<\/voice>|<speak[^>]*>)([\s\S]*?)(<voice[^>]*>|<\/speak>)/gi, (match, p1, middle, p3) => {
+        if (/<break/i.test(middle)) {
+            const wrappedMiddle = middle.replace(/(<break[^>]*\/>)/gi, `\n  <voice name="${defaultVoice}">$1</voice>\n`);
+            return `${p1}${wrappedMiddle}${p3}`;
+        }
+        return match;
     });
 
-    return repaired;
+    return cleaned;
 }
 
 async function getAudioChunk(text, voiceName, rate, pitch, volume, style, outputFormat, maxRetries = 3, env, ctx) {
