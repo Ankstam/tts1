@@ -268,6 +268,42 @@ const HTML_PAGE = `
             display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;
         }
 
+        .api-config-box {
+            margin-top: 14px; padding: 14px 16px;
+            background: rgba(16, 185, 129, 0.07);
+            border: 1.5px solid rgba(16, 185, 129, 0.28);
+            border-radius: var(--radius-lg);
+        }
+        .api-config-header {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 12px; cursor: pointer;
+        }
+        .api-config-title { font-weight: 700; font-size: 0.88rem; }
+        .api-config-desc { font-size: 0.74rem; color: var(--text-secondary); margin-top: 3px; }
+        .api-config-panel {
+            display: none; margin-top: 12px; padding-top: 12px;
+            border-top: 1px dashed rgba(16, 185, 129, 0.28);
+        }
+        .api-config-panel.open { display: block; }
+        .secret-input {
+            width: 100%; padding: 10px 12px; border: 1.5px solid var(--border);
+            border-radius: var(--radius-md); background: var(--surface-sub);
+            color: var(--text-primary); font-family: monospace; font-size: 0.84rem;
+        }
+        .secret-input:focus {
+            outline: none; border-color: #10b981;
+            box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.14);
+        }
+        .api-config-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+        .btn-config {
+            border: 1px solid var(--border); background: var(--surface);
+            color: var(--text-primary); padding: 8px 12px; border-radius: var(--radius-md);
+            cursor: pointer; font-weight: 700; font-size: 0.80rem;
+        }
+        .btn-config.primary { background: #10b981; border-color: #10b981; color: #fff; }
+        .api-config-note { margin-top: 8px; font-size: 0.72rem; color: var(--text-secondary); line-height: 1.55; }
+        .api-config-status { margin-top: 8px; font-size: 0.76rem; font-weight: 700; }
+
         .prompt-accordion-btn {
             background: transparent; border: none; color: var(--primary);
             font-size: 0.80rem; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;
@@ -430,6 +466,41 @@ const HTML_PAGE = `
                                 严格依循广东 COT 规范输出三问五答与故事复述，API Key 已由 Cloudflare 边缘安全托管。
                             </div>
                             <div id="aiKeyStatus" style="font-size:0.72rem; margin-top:5px; color:var(--text-secondary);">正在检测 Worker 密钥绑定状态...</div>
+
+                            <div class="api-config-box">
+                                <div class="api-config-header" id="apiConfigHeader">
+                                    <div>
+                                        <div class="api-config-title">🔐 API 管理员配置</div>
+                                        <div class="api-config-desc">管理员可在此输入 API Key；保存后 Key 只留在 Worker 后端，普通访客无法读取。</div>
+                                    </div>
+                                    <span id="apiConfigArrow">▼</span>
+                                </div>
+                                <div class="api-config-panel" id="apiConfigPanel">
+                                    <div class="form-group" style="margin-bottom:10px;">
+                                        <label class="form-label" style="font-size:0.80rem;">管理员配置密码</label>
+                                        <input class="secret-input" id="aiConfigPassword" type="password" autocomplete="off" placeholder="输入 Cloudflare Secret: AI_CONFIG_PASSWORD">
+                                    </div>
+                                    <div class="ai-grid-row">
+                                        <div>
+                                            <label class="form-label" style="font-size:0.80rem;">智谱 API Key</label>
+                                            <input class="secret-input" id="zhipuApiInput" type="password" autocomplete="off" placeholder="输入后保存，不会回显">
+                                        </div>
+                                        <div>
+                                            <label class="form-label" style="font-size:0.80rem;">Groq API Key</label>
+                                            <input class="secret-input" id="groqApiInput" type="password" autocomplete="off" placeholder="输入后保存，不会回显">
+                                        </div>
+                                    </div>
+                                    <div class="api-config-actions">
+                                        <button type="button" class="btn-config primary" id="saveApiConfigBtn">保存到 Worker</button>
+                                        <button type="button" class="btn-config" id="clearApiConfigBtn">清除网页输入</button>
+                                    </div>
+                                    <div class="api-config-note">
+                                        API Key 不会写入网页源码，也不会返回给访客。需要 Cloudflare KV 绑定 <b>AI_CONFIG_KV</b> 保存配置。
+                                        任何访客都可以使用已配置的 API 额度，因此请只给可信用户开放公网地址。
+                                    </div>
+                                    <div class="api-config-status" id="apiConfigStatus"></div>
+                                </div>
+                            </div>
                         </div>
                         <input type="checkbox" id="aiExamToggle" style="width: 20px; height: 20px; accent-color: var(--primary); cursor: pointer;" checked>
                     </div>
@@ -720,6 +791,92 @@ const HTML_PAGE = `
             answerToggleIcon.textContent = isHidden ? '▲ 点击收起' : '▼ 点击展开';
         };
 
+
+        // ==================== Worker API Key 管理 ====================
+        const apiConfigHeader = document.getElementById('apiConfigHeader');
+        const apiConfigPanel = document.getElementById('apiConfigPanel');
+        const apiConfigArrow = document.getElementById('apiConfigArrow');
+        const apiConfigStatus = document.getElementById('apiConfigStatus');
+
+        apiConfigHeader.onclick = function() {
+            apiConfigPanel.classList.toggle('open');
+            apiConfigArrow.textContent = apiConfigPanel.classList.contains('open') ? '▲' : '▼';
+        };
+
+        document.getElementById('clearApiConfigBtn').onclick = function() {
+            document.getElementById('zhipuApiInput').value = '';
+            document.getElementById('groqApiInput').value = '';
+            document.getElementById('aiConfigPassword').value = '';
+            apiConfigStatus.textContent = '已清除本页面输入。';
+            apiConfigStatus.style.color = 'var(--text-secondary)';
+        };
+
+        document.getElementById('saveApiConfigBtn').onclick = async function() {
+            const password = document.getElementById('aiConfigPassword').value.trim();
+            const zhipuKey = document.getElementById('zhipuApiInput').value.trim();
+            const groqKey = document.getElementById('groqApiInput').value.trim();
+
+            if (!password) {
+                apiConfigStatus.textContent = '请输入管理员配置密码。';
+                apiConfigStatus.style.color = '#dc2626';
+                return;
+            }
+            if (!zhipuKey && !groqKey) {
+                apiConfigStatus.textContent = '至少输入一个 API Key。';
+                apiConfigStatus.style.color = '#dc2626';
+                return;
+            }
+
+            const btn = document.getElementById('saveApiConfigBtn');
+            btn.disabled = true;
+            btn.textContent = '保存中...';
+            apiConfigStatus.textContent = '';
+
+            try {
+                const res = await fetch('/api/configure-ai', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        password,
+                        zhipuApiKey: zhipuKey || undefined,
+                        groqApiKey: groqKey || undefined
+                    })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok || data.error) {
+                    throw new Error(data.error || ('保存失败 HTTP ' + res.status));
+                }
+
+                document.getElementById('zhipuApiInput').value = '';
+                document.getElementById('groqApiInput').value = '';
+                document.getElementById('aiConfigPassword').value = '';
+                apiConfigStatus.textContent = '✓ 已保存。API Key 已留在 Worker 后端，页面不会回显。';
+                apiConfigStatus.style.color = '#059669';
+                if (typeof refreshAiStatus === 'function') refreshAiStatus();
+            } catch (err) {
+                apiConfigStatus.textContent = '保存失败：' + err.message;
+                apiConfigStatus.style.color = '#dc2626';
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '保存到 Worker';
+            }
+        };
+
+        async function refreshAiStatus() {
+            try {
+                const res = await fetch('/api/ai-status', { cache: 'no-store' });
+                const data = await res.json();
+                const parts = [];
+                parts.push(data.zhipu ? '智谱 ✓' : '智谱 ✗');
+                parts.push(data.groq ? 'Groq ✓' : 'Groq ✗');
+                if (data.cf) parts.push('CF AI ✓');
+                document.getElementById('aiKeyStatus').textContent = 'Worker API 状态：' + parts.join(' · ');
+            } catch {
+                document.getElementById('aiKeyStatus').textContent = 'Worker API 状态检测失败';
+            }
+        }
+        refreshAiStatus();
+
         document.getElementById('ttsForm').onsubmit = async function(e) {
             e.preventDefault();
             const text = activeTab === 'text' ? document.getElementById('textInput').value : document.getElementById('ssmlInput').value;
@@ -890,6 +1047,57 @@ async function handleRequest(request, env, ctx) {
         }, 200, { "Cache-Control": "no-store" });
     }
 
+    // ==================== AI Key 状态（只返回是否存在，绝不返回 Key） ====================
+    if (path === "/api/ai-status") {
+        if (request.method !== "GET") return jsonResponse({ error: "仅支持 GET 请求" }, 405);
+        const configured = await getStoredAIConfig(env);
+        return jsonResponse({
+            zhipu: !!configured.zhipuApiKey,
+            groq: !!configured.groqApiKey,
+            cf: !!env.AI
+        });
+    }
+
+    // ==================== 管理员从主页保存 AI Key ====================
+    if (path === "/api/configure-ai") {
+        if (request.method !== "POST") return jsonResponse({ error: "仅支持 POST 请求" }, 405);
+
+        const adminPassword = getSecret(env, ["AI_CONFIG_PASSWORD"]);
+        if (!adminPassword) {
+            return jsonResponse({
+                error: "Worker 尚未配置 AI_CONFIG_PASSWORD。请先在 Cloudflare → Variables and Secrets 添加这个 Secret 并重新 Deploy。"
+            }, 503);
+        }
+
+        if (!env.AI_CONFIG_KV) {
+            return jsonResponse({
+                error: "Worker 尚未绑定 AI_CONFIG_KV。请创建 Cloudflare KV Namespace，并把 Binding 名称设置为 AI_CONFIG_KV，然后重新 Deploy。"
+            }, 503);
+        }
+
+        const body = await request.json().catch(() => ({}));
+        const password = typeof body.password === "string" ? body.password.trim() : "";
+        const zhipuApiKey = typeof body.zhipuApiKey === "string" ? body.zhipuApiKey.trim() : "";
+        const groqApiKey = typeof body.groqApiKey === "string" ? body.groqApiKey.trim() : "";
+
+        if (!password || password !== adminPassword) {
+            return jsonResponse({ error: "管理员配置密码错误。" }, 403);
+        }
+
+        if (!zhipuApiKey && !groqApiKey) {
+            return jsonResponse({ error: "至少提供一个 API Key。" }, 400);
+        }
+
+        const oldConfig = await getStoredAIConfig(env);
+        const newConfig = {
+            zhipuApiKey: zhipuApiKey || oldConfig.zhipuApiKey || "",
+            groqApiKey: groqApiKey || oldConfig.groqApiKey || ""
+        };
+
+        await env.AI_CONFIG_KV.put("shared_ai_keys", JSON.stringify(newConfig));
+        return jsonResponse({ ok: true });
+    }
+
     if (path === "/api/generate-exam") {
         try {
             if (request.method !== "POST") {
@@ -909,7 +1117,8 @@ async function handleRequest(request, env, ctx) {
             let rawOutput = "";
 
             if (provider === "zhipu") {
-                const apiKey = getSecret(env, ["ZHIPU_API_KEY", "ZHIPUAI_API_KEY"]);
+                const storedAIConfig = await getStoredAIConfig(env);
+                const apiKey = storedAIConfig.zhipuApiKey || getSecret(env, ["ZHIPU_API_KEY", "ZHIPUAI_API_KEY"]);
                 if (!apiKey) {
                     return jsonResponse({
                         error: "Worker 没有读取到智谱密钥。请在 Cloudflare → Worker → Settings → Variables and Secrets 中添加 Secret：ZHIPU_API_KEY，然后重新 Deploy。"
@@ -930,7 +1139,8 @@ async function handleRequest(request, env, ctx) {
                 });
 
             } else if (provider === "groq") {
-                const apiKey = getSecret(env, ["GROQ_API_KEY", "GROQ_API_TOKEN"]);
+                const storedAIConfig = await getStoredAIConfig(env);
+                const apiKey = storedAIConfig.groqApiKey || getSecret(env, ["GROQ_API_KEY", "GROQ_API_TOKEN"]);
                 if (!apiKey) {
                     return jsonResponse({
                         error: "Worker 没有读取到 Groq 密钥。请在 Cloudflare → Worker → Settings → Variables and Secrets 中添加 Secret：GROQ_API_KEY，然后重新 Deploy。"
@@ -1265,6 +1475,23 @@ function normalizeProvider(provider) {
     const p = String(provider || "zhipu").trim().toLowerCase();
     if (p === "zhipu" || p === "groq" || p === "cf") return p;
     return "zhipu";
+}
+
+async function getStoredAIConfig(env) {
+    if (!env || !env.AI_CONFIG_KV) {
+        return { zhipuApiKey: "", groqApiKey: "" };
+    }
+    try {
+        const raw = await env.AI_CONFIG_KV.get("shared_ai_keys");
+        if (!raw) return { zhipuApiKey: "", groqApiKey: "" };
+        const data = JSON.parse(raw);
+        return {
+            zhipuApiKey: typeof data?.zhipuApiKey === "string" ? data.zhipuApiKey.trim() : "",
+            groqApiKey: typeof data?.groqApiKey === "string" ? data.groqApiKey.trim() : ""
+        };
+    } catch {
+        return { zhipuApiKey: "", groqApiKey: "" };
+    }
 }
 
 function getSecret(env, names) {
