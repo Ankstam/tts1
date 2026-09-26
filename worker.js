@@ -1,9 +1,12 @@
 /**
  * Cloudflare Worker: 广东高考英语听说考试 (COT) 命题与 Edge TTS 一体化网关
- * 增强特性：SSML 容错自动修复、微软真实错误回传、DeepSeek 广东考试命题
+ * 支持引擎：Cloudflare Workers AI (DeepSeek) + Groq 极速云 (GPT-OSS-120B / Qwen3.8 / GPT-OSS-20B)
  */
 
 const TOKEN_REFRESH_BEFORE_EXPIRY = 3 * 60;
+
+// 配置 Groq 默认 API Key（亦支持在 CF 环境变量中设置 GROQ_API_KEY 覆盖）
+const DEFAULT_GROQ_API_KEY = "";
 
 let tokenInfo = {
     endpoint: null,
@@ -34,6 +37,116 @@ const FORMAT_MAP = {
     "audio-24khz-160kbitrate-mono-mp3": "audio-24khz-160kbitrate-mono-mp3",
     "mp3": "audio-24khz-160kbitrate-mono-mp3"
 };
+
+// 官方标准：广东省高考英语听说考试命题 System Prompt
+const DEFAULT_COT_SYSTEM_PROMPT = `你是一名精通广东省普通高考英语听说考试（Computerized Oral Test，简称 COT）命题规则与智能机评算法的权威命题专家。
+用户会提供一段 SSML 剧本或对话文本，通常包含：
+1. Part B 角色扮演材料（双人交替日常对话）
+2. Part C 故事复述材料（单人独白记叙文）
+
+请严格执行【广东省高考英语听说考试】命题规范与信息依赖链条进行命题：
+
+【命题核心铁律】：
+1. Part B 角色扮演（满分16分）：
+   - 情景介绍：交代考生角色（如“你是学生李华”）和考试任务。
+   - 三问（中文提示）：根据情景，给出3个引导考生向对方提问的中文提示。
+   - 电脑答语（关键闭环）：必须基于输入对话的事实，提炼或给出【电脑对这3个提问的英文答语】（Computer's Response 1, 2, 3）。
+   - 五答（英文听力问答）题源铁律：
+     * Question 1、Question 2：问题答案【必须且只能】来自初始原对话的事实！
+     * Question 3：问题答案【必须且只能】针对【电脑对第1问的答语】展开提问！
+     * Question 4：问题答案【必须且只能】针对【电脑对第2问的答语】展开提问！
+     * Question 5：问题答案【必须且只能】针对【电脑对第3问的答语】展开提问！
+2. Part C 故事复述（满分24分）：
+   - 故事梗概：用 30-50 字中文精炼总结短文情节（包含主人公、起因、高潮、结果）。
+   - 关键词：严格精选【5个中英文对照关键词/词组】，且必须【严格按照故事时间发生先后顺序】排列！
+   - 核心采分点：提炼 8-10 个机评评分要点（Information Points）。
+3. 答案规范：
+   - 三问标准问句：提供规范直接疑问句（疑问词+助动词+主语+动词），注意时态。
+   - 五答标准答案：提供机评认可的【完整句】与【极简采分答语】。
+   - 高分复述范文：必须保持【一般过去时（Past Tense）】一致性，词数100-120词，逻辑词衔接顺畅。
+
+【输出格式要求】：
+严格分为 <EXAM> 试题 和 <ANSWER> 参考答案 两部分，禁止添加标签外的多余文字。
+
+规范范本：
+<EXAM>
+二、Part B 角色扮演 原题
+
+情景介绍
+
+角色：你是学生
+任务：1. 根据中文提示，向对方提3个问题；2. 回答电脑的5个问题
+
+三问（中文提示）
+
+1. [中文提问提示 1]
+
+2. [中文提问提示 2]
+
+3. [中文提问提示 3]
+
+五答（听力问答）
+
+1. [基于原对话事实的英文提问 1]
+
+2. [基于原对话事实的英文提问 2]
+
+3. [基于电脑对第1问答语的英文提问 3]
+
+4. [基于电脑对第2问答语的英文提问 4]
+
+5. [基于电脑对第3问答语的英文提问 5]
+
+三、Part C 故事复述 原题
+
+故事梗概
+
+[30-50字中文精炼梗概]
+
+关键词
+
+[关键词1], [关键词2], [关键词3], [关键词4], [关键词5]
+</EXAM>
+
+<ANSWER>
+Part B 电脑答语（听力出题源）
+
+1. [针对三问第1题，电脑播放的答语]
+
+2. [针对三问第2题，电脑播放的答语]
+
+3. [针对三问第3题，电脑播放的答语]
+
+Part B 三问标准句式
+
+1. [三问第1题标准提问]
+
+2. [三问第2题标准提问]
+
+3. [三问第3题标准提问]
+
+Part B 五答标准答语
+
+1. 完整句：[完整句答案] | 简答：[核心词]
+
+2. 完整句：[完整句答案] | 简答：[核心词]
+
+3. 完整句：[完整句答案] | 简答：[核心词]
+
+4. 完整句：[完整句答案] | 简答：[核心词]
+
+5. 完整句：[完整句答案] | 简答：[核心词]
+
+Part C 故事复述机评采分点
+
+1. [信息点 1]
+2. [信息点 2]
+...（共 8-10 个关键点）
+
+Part C 高分复述范文（全篇一般过去时）
+
+[100-120词高分记叙文范文]
+</ANSWER>`;
 
 const HTML_PAGE = `
 <!DOCTYPE html>
@@ -162,15 +275,33 @@ const HTML_PAGE = `
         .slider-val { font-size: 0.82rem; color: var(--primary); font-weight: 700; }
         .form-range { width: 100%; accent-color: var(--primary); cursor: pointer; }
 
+        /* AI 命题配置大卡片 */
         .ai-exam-box {
-            background: rgba(37, 99, 235, 0.08); border: 1px solid rgba(37, 99, 235, 0.3);
-            border-radius: var(--radius-md); padding: 12px 16px; margin-bottom: 18px;
+            background: rgba(37, 99, 235, 0.08); border: 1.5px solid rgba(37, 99, 235, 0.3);
+            border-radius: var(--radius-lg); padding: 14px 16px; margin-bottom: 18px;
+        }
+        .ai-exam-header {
             display: flex; align-items: center; justify-content: space-between; cursor: pointer;
         }
         .ai-exam-title {
-            font-weight: 700; font-size: 0.88rem; color: var(--text-primary); display: flex; align-items: center; gap: 8px;
+            font-weight: 700; font-size: 0.90rem; color: var(--text-primary); display: flex; align-items: center; gap: 8px;
         }
         .ai-exam-desc { font-size: 0.76rem; color: var(--text-secondary); margin-top: 2px; }
+
+        .ai-config-panel {
+            margin-top: 14px; padding-top: 12px; border-top: 1px dashed rgba(37, 99, 235, 0.25);
+            display: flex; flex-direction: column; gap: 12px;
+        }
+        .ai-grid-row {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;
+        }
+
+        .prompt-accordion-btn {
+            background: transparent; border: none; color: var(--primary);
+            font-size: 0.80rem; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;
+            padding: 4px 0; text-decoration: underline;
+        }
+        .prompt-edit-container { display: none; margin-top: 8px; }
 
         .btn-primary {
             width: 100%; background: var(--primary); color: #ffffff; border: none; padding: 13px;
@@ -201,8 +332,8 @@ const HTML_PAGE = `
             margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
         }
         .exam-badge {
-            background: rgba(37, 99, 235, 0.15); color: var(--primary); font-size: 0.74rem; font-weight: 700;
-            padding: 2px 8px; border-radius: 999px;
+            background: rgba(37, 99, 235, 0.15); color: var(--primary); font-size: 0.74rem;
+            font-weight: 700; padding: 2px 8px; border-radius: 999px;
         }
         .exam-body {
             background: var(--surface-sub); border-radius: var(--radius-md); padding: 14px;
@@ -277,7 +408,7 @@ const HTML_PAGE = `
                 </div>
 
                 <div class="form-group" id="ssmlArea">
-                    <label class="form-label">SSML 材料编辑 (支持男女声交替)</label>
+                    <label class="form-label">SSML 材料编辑 (支持多角色发音人)</label>
                     <textarea class="form-textarea ssml-editor" id="ssmlInput"></textarea>
                 </div>
 
@@ -285,9 +416,9 @@ const HTML_PAGE = `
                     <div class="form-group">
                         <label class="form-label" for="voiceSelect">默认播音音色</label>
                         <select class="form-select" id="voiceSelect">
-                            <option value="en-US-GuyNeural" selected>Guy (美式男声 - 标准旁白/播报)</option>
-                            <option value="en-US-JennyNeural">Jenny (美式女声 - 对话角色)</option>
-                            <option value="zh-CN-YunxiNeural">云希 (中文标准普通话)</option>
+                            <option value="en-US-GuyNeural" selected>Guy (美式男声 - 标准播音/男角色)</option>
+                            <option value="en-US-JennyNeural">Jenny (美式女声 - 女角色)</option>
+                            <option value="zh-CN-YunxiNeural">云希 (中文普通话)</option>
                         </select>
                     </div>
 
@@ -316,21 +447,57 @@ const HTML_PAGE = `
                     </div>
                 </div>
 
-                <label class="ai-exam-box" for="aiExamToggle">
-                    <div>
-                        <div class="ai-exam-title">
-                            <span>✨</span> 开启广东高考听说 AI 逆向命题 (DeepSeek 驱动)
+                <!-- AI 听说命题多引擎配置面板 -->
+                <div class="ai-exam-box">
+                    <div class="ai-exam-header" id="aiExamToggleWrap">
+                        <div>
+                            <div class="ai-exam-title">
+                                <span>✨</span> 开启广东高考听说 AI 智能命题
+                            </div>
+                            <div class="ai-exam-desc">
+                                严格依循广东 COT 规范输出三问五答与故事复述，支持自选推理渠道与自定义 Prompt。
+                            </div>
                         </div>
-                        <div class="ai-exam-desc">
-                            严格按广东 COT 规范输出：三问中文指令、电脑答语、五答信息链分布，以及时序关键词与复述要点。
+                        <input type="checkbox" id="aiExamToggle" style="width: 20px; height: 20px; accent-color: var(--primary); cursor: pointer;" checked>
+                    </div>
+
+                    <div class="ai-config-panel" id="aiConfigPanel">
+                        <div class="ai-grid-row">
+                            <div>
+                                <label class="form-label" style="font-size:0.80rem; margin-bottom:4px;">推理计算引擎</label>
+                                <select class="form-select" id="aiProviderSelect">
+                                    <option value="groq" selected>Groq 极速云 (LPU 毫秒级加速)</option>
+                                    <option value="cf">Cloudflare 自带 (DeepSeek-R1-32B)</option>
+                                </select>
+                            </div>
+                            <div id="groqModelWrap">
+                                <label class="form-label" style="font-size:0.80rem; margin-bottom:4px;">Groq 命题模型 (已按规模排序)</label>
+                                <select class="form-select" id="groqModelSelect">
+                                    <option value="openai/gpt-oss-120b" selected>openai/gpt-oss-120b (120B 旗舰级 · 推荐)</option>
+                                    <option value="qwen/qwen3.8-27b">qwen/qwen3.8-27b (27B 中英通义全能)</option>
+                                    <option value="openai/gpt-oss-20b">openai/gpt-oss-20b (20B 极速推理轻量)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div>
+                            <button type="button" class="prompt-accordion-btn" id="togglePromptBtn">
+                                <span>⚙️ 自定义指示词 (System Prompt) 展开编辑</span>
+                            </button>
+                            <div class="prompt-edit-container" id="promptEditBox">
+                                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                                    <span style="font-size:0.75rem; color:var(--text-secondary);">留空或未修改时，将自动调用系统内置的广东高考 COT 命题指示词</span>
+                                    <button type="button" class="btn-copy" id="resetPromptBtn" style="padding:2px 8px; font-size:0.72rem;">↺ 恢复预设</button>
+                                </div>
+                                <textarea class="form-textarea" id="customPromptInput" style="min-height:160px; font-size:0.82rem; font-family:monospace;"></textarea>
+                            </div>
                         </div>
                     </div>
-                    <input type="checkbox" id="aiExamToggle" style="width: 20px; height: 20px; accent-color: var(--primary); cursor: pointer;" checked>
-                </label>
+                </div>
 
                 <button type="submit" class="btn-primary" id="generateBtn">
                     <span>🎙️</span>
-                    <span>立即开始合成并生成标准考卷</span>
+                    <span>立即开始合成音频与试卷</span>
                 </button>
             </form>
 
@@ -352,21 +519,23 @@ const HTML_PAGE = `
                 </div>
             </div>
 
+            <!-- 试卷呈现 -->
             <div id="examCard" class="exam-card">
                 <div class="exam-header">
                     <div style="display:flex; align-items:center; gap:8px;">
                         <span style="font-weight:700; font-size:0.92rem;">📝 广东省高考英语听说考试标准试题</span>
-                        <span class="exam-badge" id="examBadge">DeepSeek 命题中...</span>
+                        <span class="exam-badge" id="examBadge">AI 命题中...</span>
                     </div>
                     <button type="button" class="btn-copy" id="copyExamBtn">📋 复制试题</button>
                 </div>
                 <div id="examLoading" style="display:none; text-align:center; padding:18px 0;">
                     <div class="loading-spinner"></div>
-                    <div style="font-size:0.82rem; color:var(--text-secondary);">DeepSeek 正在严格按广东听说命题细则研制考卷...</div>
+                    <div style="font-size:0.82rem; color:var(--text-secondary);">AI 正在解析对话逻辑并组织命题点...</div>
                 </div>
                 
                 <pre class="exam-body" id="examBody"></pre>
 
+                <!-- 答案与范文折叠保护区 -->
                 <div class="answer-container" id="answerContainer" style="display: none;">
                     <button type="button" class="btn-toggle-answer" id="toggleAnswerBtn">
                         <span>💡 查看参考答案、电脑答语与评分要点</span>
@@ -384,6 +553,9 @@ const HTML_PAGE = `
     </main>
 
     <script>
+        const DEFAULT_SYSTEM_PROMPT = ${JSON.stringify(DEFAULT_COT_SYSTEM_PROMPT)};
+        document.getElementById('customPromptInput').value = DEFAULT_SYSTEM_PROMPT;
+
         const DEFAULT_EXAM_SSML = \`<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">
   <!-- 播报 Part B + 2秒停顿 -->
   <voice name="en-US-GuyNeural">
@@ -441,6 +613,7 @@ const HTML_PAGE = `
 
         document.getElementById('ssmlInput').value = DEFAULT_EXAM_SSML;
 
+        // 壁纸与主题
         const bg = document.getElementById('bgOverlay');
         if (bg) bg.style.backgroundImage = "url('/api/wallpaper?t=" + Date.now() + "')";
 
@@ -483,6 +656,7 @@ const HTML_PAGE = `
         setInterval(updateCountdowns, 1000);
         updateCountdowns();
 
+        // 标签切换
         let activeTab = 'ssml';
         const textTab = document.getElementById('textTab');
         const ssmlTab = document.getElementById('ssmlTab');
@@ -505,6 +679,28 @@ const HTML_PAGE = `
         speedInput.oninput = function() { document.getElementById('speedVal').textContent = parseFloat(speedInput.value).toFixed(2) + 'x'; };
         pitchInput.oninput = function() { document.getElementById('pitchVal').textContent = (pitchInput.value >= 0 ? '+' : '') + pitchInput.value + 'Hz'; };
 
+        // 引擎与模型联动交互
+        const aiProviderSelect = document.getElementById('aiProviderSelect');
+        const groqModelWrap = document.getElementById('groqModelWrap');
+        aiProviderSelect.onchange = function() {
+            groqModelWrap.style.display = this.value === 'groq' ? 'block' : 'none';
+        };
+
+        // 指示词手风琴展开与重置
+        const togglePromptBtn = document.getElementById('togglePromptBtn');
+        const promptEditBox = document.getElementById('promptEditBox');
+        togglePromptBtn.onclick = function() {
+            const isHidden = promptEditBox.style.display === 'none' || promptEditBox.style.display === '';
+            promptEditBox.style.display = isHidden ? 'block' : 'none';
+            togglePromptBtn.textContent = isHidden ? '▲ 收起自定义指示词编辑' : '⚙️ 自定义指示词 (System Prompt) 展开编辑';
+        };
+
+        document.getElementById('resetPromptBtn').onclick = function() {
+            document.getElementById('customPromptInput').value = DEFAULT_SYSTEM_PROMPT;
+            alert('已恢复为官方预设的广东高考命题指示词！');
+        };
+
+        // 复制按钮
         document.getElementById('copyExamBtn').onclick = function() {
             const content = document.getElementById('examBody').textContent;
             if (!content) return;
@@ -516,6 +712,7 @@ const HTML_PAGE = `
             navigator.clipboard.writeText(content).then(() => alert('参考答案已成功复制！'));
         };
 
+        // 答案折叠切换
         const toggleAnswerBtn = document.getElementById('toggleAnswerBtn');
         const answerCollapseBox = document.getElementById('answerCollapseBox');
         const answerToggleIcon = document.getElementById('answerToggleIcon');
@@ -525,6 +722,7 @@ const HTML_PAGE = `
             answerToggleIcon.textContent = isHidden ? '▲ 点击收起' : '▼ 点击展开';
         };
 
+        // 表单提交
         document.getElementById('ttsForm').onsubmit = async function(e) {
             e.preventDefault();
             const text = activeTab === 'text' ? document.getElementById('textInput').value : document.getElementById('ssmlInput').value;
@@ -561,7 +759,7 @@ const HTML_PAGE = `
                 answerContainer.style.display = 'none';
                 answerCollapseBox.style.display = 'none';
                 answerToggleIcon.textContent = '▼ 点击展开';
-                examBadge.textContent = 'DeepSeek 命题中...';
+                examBadge.textContent = '命题研制中...';
             } else {
                 examCard.style.display = 'none';
             }
@@ -594,13 +792,22 @@ const HTML_PAGE = `
                 alert('音频生成异常: ' + err.message);
             });
 
-            // 2. 发起 DeepSeek 试卷生成
+            // 2. 发起 AI 试题与答案生成
             let examTask = Promise.resolve();
             if (enableExam) {
+                const provider = aiProviderSelect.value;
+                const model = document.getElementById('groqModelSelect').value;
+                const customPrompt = document.getElementById('customPromptInput').value.trim();
+
                 examTask = fetch('/api/generate-exam', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text: text })
+                    body: JSON.stringify({
+                        text: text,
+                        provider: provider,
+                        model: model,
+                        systemPrompt: customPrompt
+                    })
                 }).then(async res => {
                     const data = await res.json();
                     examLoading.style.display = 'none';
@@ -613,7 +820,7 @@ const HTML_PAGE = `
                             answerBody.textContent = data.answer;
                             answerContainer.style.display = 'block';
                         }
-                        examBadge.textContent = '命题完毕';
+                        examBadge.textContent = provider === 'groq' ? ('Groq: ' + model.split('/')[1]) : 'CF: DeepSeek';
                     }
                 }).catch(err => {
                     examLoading.style.display = 'none';
@@ -668,19 +875,10 @@ async function handleRequest(request, env, ctx) {
         }
     }
 
-    // ==================== DeepSeek 广东高考听说考试深度命题 ====================
+    // ==================== 多渠道 (Groq / CF DeepSeek) 听说试题生成 ====================
     if (path === "/api/generate-exam") {
-        if (!env.AI) {
-            return new Response(JSON.stringify({
-                error: "未在 wrangler.toml 中绑定 Workers AI。请配置 [ai] binding = 'AI'"
-            }), {
-                status: 500,
-                headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
-            });
-        }
-
         try {
-            const { text } = await request.json();
+            const { text, provider = "groq", model = "openai/gpt-oss-120b", systemPrompt } = await request.json();
             if (!text || !text.trim()) {
                 return new Response(JSON.stringify({ error: "文本内容不能为空" }), {
                     status: 400,
@@ -688,126 +886,61 @@ async function handleRequest(request, env, ctx) {
                 });
             }
 
-            const systemPrompt = `你是一名精通广东省普通高考英语听说考试（Computerized Oral Test，简称 COT）命题规则与智能机评算法的权威命题专家。
-用户会提供一段 SSML 剧本或对话文本，通常包含：
-1. Part B 角色扮演材料（双人交替日常对话）
-2. Part C 故事复述材料（单人独白记叙文）
+            // 指示词优先级：用户自定义（非空） > 官方预设默认指示词
+            const finalPrompt = (systemPrompt && systemPrompt.trim()) ? systemPrompt.trim() : DEFAULT_COT_SYSTEM_PROMPT;
 
-请严格执行【广东省高考英语听说考试】命题规范与信息依赖链条进行命题：
+            let rawOutput = "";
 
-【命题核心铁律】：
-1. Part B 角色扮演（满分16分）：
-   - 情景介绍：交代考生角色（如“你是学生李华”）和考试任务。
-   - 三问（中文提示）：根据情景，给出3个引导考生向对方提问的中文提示。
-   - 电脑答语（关键闭环）：必须基于输入对话的事实，提炼或给出【电脑对这3个提问的英文答语】（Computer's Response 1, 2, 3）。
-   - 五答（英文听力问答）题源铁律：
-     * Question 1、Question 2：问题答案【必须且只能】来自初始原对话的事实！
-     * Question 3：问题答案【必须且只能】针对【电脑对第1问的答语】展开提问！
-     * Question 4：问题答案【必须且只能】针对【电脑对第2问的答语】展开提问！
-     * Question 5：问题答案【必须且只能】针对【电脑对第3问的答语】展开提问！
-2. Part C 故事复述（满分24分）：
-   - 故事梗概：用 30-50 字中文精炼总结短文情节（包含主人公、起因、高潮、结果）。
-   - 关键词：严格精选【5个中英文对照关键词/词组】，且必须【严格按照故事时间发生先后顺序】排列！
-   - 核心采分点：提炼 8-10 个机评评分要点（Information Points）。
-3. 答案规范：
-   - 三问标准问句：提供规范直接疑问句（疑问词+助动词+主语+动词），注意时态。
-   - 五答标准答案：提供机评认可的【完整句】与【极简采分答语】。
-   - 高分复述范文：必须保持【一般过去时（Past Tense）】一致性，词数100-120词，逻辑词衔接顺畅。
+            if (provider === "groq") {
+                const groqApiKey = env.GROQ_API_KEY || DEFAULT_GROQ_API_KEY;
+                const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+                    method: "POST",
+                    headers: {
+                        "Authorization": `Bearer ${groqApiKey}`,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        model: model,
+                        messages: [
+                            { role: "system", content: finalPrompt },
+                            { role: "user", content: `请根据以下考试材料，严格遵循广东英语听说高考规则命题并研制标准答案：\n\n${text}` }
+                        ],
+                        temperature: 0.35,
+                        max_tokens: 2800
+                    })
+                });
 
-【输出格式要求】：
-严格分为 <EXAM> 试题 和 <ANSWER> 参考答案 两部分，禁止添加标签外的多余文字。
+                if (!groqRes.ok) {
+                    const errDetail = await groqRes.json().catch(() => ({}));
+                    throw new Error("Groq API 拒绝: " + (errDetail.error?.message || `HTTP ${groqRes.status}`));
+                }
 
-规范范本：
-<EXAM>
-二、Part B 角色扮演 原题
+                const groqData = await groqRes.json();
+                rawOutput = (groqData.choices?.[0]?.message?.content || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+            } else {
+                // Cloudflare Workers AI 原生推理 (DeepSeek-R1-32B)
+                if (!env.AI) {
+                    return new Response(JSON.stringify({
+                        error: "未在 wrangler.toml 中绑定 Workers AI。请配置 [ai] binding = 'AI' 或切换为 Groq 引擎"
+                    }), {
+                        status: 500,
+                        headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
+                    });
+                }
 
-情景介绍
+                const aiResponse = await env.AI.run("@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", {
+                    messages: [
+                        { role: "system", content: finalPrompt },
+                        { role: "user", content: `请根据以下考试材料，严格遵循广东英语听说高考规则命题并研制标准答案：\n\n${text}` }
+                    ],
+                    max_tokens: 2800,
+                    temperature: 0.35
+                });
 
-角色：你是学生
-任务：1. 根据中文提示，向对方提3个问题；2. 回答电脑的5个问题
+                rawOutput = (aiResponse.response || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+            }
 
-三问（中文提示）
-
-1. [中文提问提示 1]
-
-2. [中文提问提示 2]
-
-3. [中文提问提示 3]
-
-五答（听力问答）
-
-1. [基于原对话事实的英文提问 1]
-
-2. [基于原对话事实的英文提问 2]
-
-3. [基于电脑对第1问答语的英文提问 3]
-
-4. [基于电脑对第2问答语的英文提问 4]
-
-5. [基于电脑对第3问答语的英文提问 5]
-
-三、Part C 故事复述 原题
-
-故事梗概
-
-[30-50字中文精炼梗概]
-
-关键词
-
-[关键词1], [关键词2], [关键词3], [关键词4], [关键词5]
-</EXAM>
-
-<ANSWER>
-Part B 电脑答语（听力出题源）
-
-1. [针对三问第1题，电脑播放的答语]
-
-2. [针对三问第2题，电脑播放的答语]
-
-3. [针对三问第3题，电脑播放的答语]
-
-Part B 三问标准句式
-
-1. [三问第1题标准提问]
-
-2. [三问第2题标准提问]
-
-3. [三问第3题标准提问]
-
-Part B 五答标准答语
-
-1. 完整句：[完整句答案] | 简答：[核心词]
-
-2. 完整句：[完整句答案] | 简答：[核心词]
-
-3. 完整句：[完整句答案] | 简答：[核心词]
-
-4. 完整句：[完整句答案] | 简答：[核心词]
-
-5. 完整句：[完整句答案] | 简答：[核心词]
-
-Part C 故事复述机评采分点
-
-1. [信息点 1]
-2. [信息点 2]
-...（共 8-10 个关键点）
-
-Part C 高分复述范文（全篇一般过去时）
-
-[100-120词高分记叙文范文]
-</ANSWER>`;
-
-            const aiResponse = await env.AI.run("@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", {
-                messages: [
-                    { role: "system", content: systemPrompt },
-                    { role: "user", content: `请根据以下考试材料，严格遵循广东英语听说高考规则命题并研制标准答案：\n\n${text}` }
-                ],
-                max_tokens: 2800,
-                temperature: 0.35
-            });
-
-            let rawOutput = (aiResponse.response || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
-
+            // 结构化提取原题与参考答案
             let examContent = rawOutput;
             let answerContent = "";
 
@@ -824,8 +957,8 @@ Part C 高分复述范文（全篇一般过去时）
                 headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
             });
         } catch (error) {
-            console.error("DeepSeek 命题失败:", error);
-            return new Response(JSON.stringify({ error: error.message || "DeepSeek 命题服务异常" }), {
+            console.error("AI 命题失败:", error);
+            return new Response(JSON.stringify({ error: error.message || "命题服务异常" }), {
                 status: 500,
                 headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
             });
@@ -938,11 +1071,9 @@ async function getVoice(text, voiceName, rate, pitch, volume, style, outputForma
     });
 }
 
-// 核心修复函数：自动修复裸露在 <speak> 下的 <break>，并补齐 voice 标签
 function sanitizeSsml(ssmlText, defaultVoice = "en-US-GuyNeural") {
     if (!ssmlText.trim().startsWith('<speak')) return ssmlText;
 
-    // 1. 将孤立在 </voice> 与 <voice 之间，或者紧随 <speak> 之后的裸露 <break ... /> 包裹一层 voice
     let repaired = ssmlText.replace(/(<\/voice>|<speak[^>]*>)\s*(<break[^>]*\/>)\s*(<voice|<\/speak>)/gi, (match, p1, p2, p3) => {
         return `${p1}\n  <voice name="${defaultVoice}">\n    ${p2}\n  </voice>\n  ${p3}`;
     });
@@ -964,8 +1095,6 @@ async function getAudioChunk(text, voiceName, rate, pitch, volume, style, output
             }
 
             let requestSsml = getSsml(text, voiceName, rate, pitch, volume, style, slien);
-            
-            // 执行 SSML 语法容错自动修复
             requestSsml = sanitizeSsml(requestSsml, voiceName);
 
             const response = await fetch(url, {
