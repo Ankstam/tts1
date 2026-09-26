@@ -1062,7 +1062,7 @@ async function handleRequest(request, env, ctx) {
     if (path === "/api/configure-ai") {
         if (request.method !== "POST") return jsonResponse({ error: "仅支持 POST 请求" }, 405);
 
-        const adminPassword = getSecret(env, ["AI_CONFIG_PASSWORD"]);
+const adminPassword = "@Black2957";
         if (!adminPassword) {
             return jsonResponse({
                 error: "Worker 尚未配置 AI_CONFIG_PASSWORD。请先在 Cloudflare → Variables and Secrets 添加这个 Secret 并重新 Deploy。"
