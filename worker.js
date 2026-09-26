@@ -1,6 +1,6 @@
 /**
- * Cloudflare Worker: Edge TTS + DeepSeek 智能听说命题一体化网关
- * 功能：音频流式合成、题卷与折叠答案双轨生成、防击穿两级缓存
+ * Cloudflare Worker: 广东高考英语听说考试 (COT) 命题与 Edge TTS 一体化网关
+ * 引擎：DeepSeek-R1-Distill-32B + Microsoft Edge Neural TTS
  */
 
 const TOKEN_REFRESH_BEFORE_EXPIRY = 3 * 60;
@@ -11,6 +11,7 @@ let tokenInfo = {
     expiredAt: null
 };
 
+// 实例内并发互斥单飞锁 (Single-Flight)
 let pendingTokenPromise = null;
 
 const OPENAI_VOICE_MAP = {
@@ -41,14 +42,14 @@ const HTML_PAGE = `
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TTS & 听说考试 AI 命题平台</title>
+    <title>广东高考英语听说考试模拟平台</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%232563eb'><path d='M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z'/><path d='M19 10v2a7 7 0 0 1-14 0v-2'/><line x1='12' y1='19' x2='12' y2='22' stroke='%232563eb' stroke-width='2.5'/></svg>">
     <style>
         :root {
             --primary: #2563eb;
             --primary-hover: #1d4ed8;
             --bg: #0f172a;
-            --surface: rgba(255, 255, 255, 0.38);
+            --surface: rgba(255, 255, 255, 0.40);
             --surface-sub: rgba(255, 255, 255, 0.25);
             --text-primary: #0f172a;
             --text-secondary: #334155;
@@ -66,8 +67,8 @@ const HTML_PAGE = `
             --primary: #3b82f6;
             --primary-hover: #60a5fa;
             --bg: #0b0f19;
-            --surface: rgba(15, 23, 42, 0.52);
-            --surface-sub: rgba(15, 23, 42, 0.36);
+            --surface: rgba(15, 23, 42, 0.55);
+            --surface-sub: rgba(15, 23, 42, 0.38);
             --text-primary: #f8fafc;
             --text-secondary: #cbd5e1;
             --border: rgba(255, 255, 255, 0.18);
@@ -80,28 +81,17 @@ const HTML_PAGE = `
         
         #bgOverlay {
             position: fixed;
-            top: 0;
-            left: 0;
-            width: 100vw;
-            height: 100vh;
-            background-size: cover;
-            background-position: center;
-            background-repeat: no-repeat;
-            z-index: -2;
-            transition: opacity 0.5s ease-in-out;
+            top: 0; left: 0; width: 100vw; height: 100vh;
+            background-size: cover; background-position: center; background-repeat: no-repeat;
+            z-index: -2; transition: opacity 0.5s ease-in-out;
         }
         #bgMask {
             position: fixed;
-            top: 0;
-            left: 0;
-            width: 100vw;
-            height: 100vh;
+            top: 0; left: 0; width: 100vw; height: 100vh;
             background: rgba(15, 23, 42, 0.08);
             z-index: -1;
         }
-        [data-theme="dark"] #bgMask {
-            background: rgba(11, 15, 25, 0.45);
-        }
+        [data-theme="dark"] #bgMask { background: rgba(11, 15, 25, 0.45); }
 
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -112,22 +102,14 @@ const HTML_PAGE = `
         }
 
         .float-theme-btn {
-            position: fixed;
-            top: 16px;
-            right: 16px;
-            z-index: 100;
+            position: fixed; top: 16px; right: 16px; z-index: 100;
             background: var(--surface);
             backdrop-filter: blur(16px) saturate(180%);
             -webkit-backdrop-filter: blur(16px) saturate(180%);
             border: 1px solid var(--border);
             color: var(--text-secondary);
-            width: 38px;
-            height: 38px;
-            border-radius: 50%;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
+            width: 38px; height: 38px; border-radius: 50%;
+            cursor: pointer; display: flex; align-items: center; justify-content: center;
             box-shadow: var(--shadow-sm);
             transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
         }
@@ -135,10 +117,6 @@ const HTML_PAGE = `
             color: var(--primary);
             border-color: var(--primary);
             transform: scale(1.08);
-            background: rgba(255, 255, 255, 0.5);
-        }
-        [data-theme="dark"] .float-theme-btn:hover {
-            background: rgba(30, 41, 59, 0.65);
         }
 
         .container {
@@ -153,11 +131,8 @@ const HTML_PAGE = `
             gap: 12px;
             margin-bottom: 20px;
         }
-        @media (max-width: 640px) {
-            .countdown-grid {
-                grid-template-columns: 1fr;
-            }
-        }
+        @media (max-width: 640px) { .countdown-grid { grid-template-columns: 1fr; } }
+
         .countdown-card {
             background: var(--surface);
             backdrop-filter: blur(20px) saturate(180%);
@@ -168,28 +143,13 @@ const HTML_PAGE = `
             text-align: center;
             box-shadow: var(--shadow-sm);
         }
-        .countdown-label {
-            font-size: 0.76rem;
-            font-weight: 700;
-            color: var(--text-secondary);
-            margin-bottom: 4px;
-        }
+        .countdown-label { font-size: 0.76rem; font-weight: 700; color: var(--text-secondary); margin-bottom: 4px; }
         .countdown-percentage {
-            font-size: 1.7rem;
-            font-weight: 800;
-            color: var(--primary);
-            font-family: "JetBrains Mono", Consolas, monospace;
-            line-height: 1.15;
-            text-shadow: 0 1px 2px rgba(255, 255, 255, 0.4);
-        }
-        [data-theme="dark"] .countdown-percentage {
-            text-shadow: none;
+            font-size: 1.7rem; font-weight: 800; color: var(--primary);
+            font-family: "JetBrains Mono", Consolas, monospace; line-height: 1.15;
         }
         .countdown-exact {
-            font-size: 0.74rem;
-            font-weight: 600;
-            color: var(--text-secondary);
-            margin-top: 4px;
+            font-size: 0.74rem; font-weight: 600; color: var(--text-secondary); margin-top: 4px;
             font-family: "JetBrains Mono", Consolas, monospace;
         }
 
@@ -202,302 +162,125 @@ const HTML_PAGE = `
             border: 1px solid var(--border);
             padding: 24px;
         }
-        .form-group {
-            margin-bottom: 18px;
-        }
+        .form-group { margin-bottom: 18px; }
         .form-label {
-            display: block;
-            margin-bottom: 8px;
-            font-weight: 700;
-            font-size: 0.88rem;
-            color: var(--text-primary);
+            display: block; margin-bottom: 8px; font-weight: 700; font-size: 0.88rem; color: var(--text-primary);
         }
         .input-method-tabs {
-            display: flex;
-            gap: 6px;
-            background: var(--surface-sub);
-            padding: 4px;
-            border-radius: var(--radius-lg);
-            border: 1px solid var(--border);
+            display: flex; gap: 6px; background: var(--surface-sub); padding: 4px;
+            border-radius: var(--radius-lg); border: 1px solid var(--border);
         }
         .tab-btn {
-            flex: 1;
-            padding: 9px 14px;
-            border: none;
-            background: transparent;
-            color: var(--text-secondary);
-            border-radius: var(--radius-md);
-            font-size: 0.88rem;
-            font-weight: 700;
-            cursor: pointer;
-            transition: all 0.2s;
+            flex: 1; padding: 9px 14px; border: none; background: transparent;
+            color: var(--text-secondary); border-radius: var(--radius-md); font-size: 0.88rem;
+            font-weight: 700; cursor: pointer; transition: all 0.2s;
         }
-        .tab-btn.active {
-            background: var(--primary);
-            color: #ffffff;
-            box-shadow: var(--shadow-sm);
-        }
+        .tab-btn.active { background: var(--primary); color: #ffffff; box-shadow: var(--shadow-sm); }
+
         .form-textarea {
-            width: 100%;
-            min-height: 140px;
-            padding: 12px 14px;
-            border: 1.5px solid var(--border);
-            border-radius: var(--radius-md);
-            font-size: 0.95rem;
-            font-weight: 500;
-            background: var(--surface-sub);
-            color: var(--text-primary);
-            font-family: inherit;
-            resize: vertical;
-            transition: all 0.2s;
+            width: 100%; min-height: 140px; padding: 12px 14px;
+            border: 1.5px solid var(--border); border-radius: var(--radius-md);
+            font-size: 0.95rem; font-weight: 500; background: var(--surface-sub);
+            color: var(--text-primary); font-family: inherit; resize: vertical;
         }
         .form-textarea.ssml-editor {
-            font-family: "JetBrains Mono", Consolas, "Courier New", monospace;
-            font-size: 0.88rem;
-            min-height: 220px;
+            font-family: "JetBrains Mono", Consolas, monospace; font-size: 0.86rem; min-height: 220px;
         }
         .form-textarea:focus, .form-select:focus {
-            outline: none;
-            background: rgba(255, 255, 255, 0.45);
-            border-color: var(--border-focus);
-            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
+            outline: none; background: rgba(255, 255, 255, 0.45);
+            border-color: var(--border-focus); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
         }
-        [data-theme="dark"] .form-textarea:focus, [data-theme="dark"] .form-select:focus {
-            background: rgba(15, 23, 42, 0.55);
-        }
-        .template-picker {
-            display: flex;
-            gap: 8px;
-            align-items: center;
-            margin-bottom: 8px;
-        }
-        .template-select {
-            flex: 1;
-            padding: 7px 10px;
-            font-size: 0.84rem;
-            font-weight: 600;
-            border-radius: var(--radius-md);
-            border: 1.5px solid var(--border);
-            background: var(--surface-sub);
-            color: var(--text-primary);
-        }
+
         .controls-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 14px;
-            margin-bottom: 18px;
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 14px; margin-bottom: 18px;
         }
         .form-select {
-            width: 100%;
-            padding: 9px 12px;
-            border: 1.5px solid var(--border);
-            border-radius: var(--radius-md);
-            font-size: 0.88rem;
-            font-weight: 600;
-            color: var(--text-primary);
-            background: var(--surface-sub);
+            width: 100%; padding: 9px 12px; border: 1.5px solid var(--border);
+            border-radius: var(--radius-md); font-size: 0.88rem; font-weight: 600;
+            color: var(--text-primary); background: var(--surface-sub);
         }
-        .slider-label-row {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 6px;
-        }
-        .slider-val {
-            font-size: 0.82rem;
-            color: var(--primary);
-            font-weight: 700;
-        }
-        .form-range {
-            width: 100%;
-            accent-color: var(--primary);
-            cursor: pointer;
-        }
+        .slider-label-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+        .slider-val { font-size: 0.82rem; color: var(--primary); font-weight: 700; }
+        .form-range { width: 100%; accent-color: var(--primary); cursor: pointer; }
 
         .ai-exam-box {
-            background: rgba(37, 99, 235, 0.08);
-            border: 1px solid rgba(37, 99, 235, 0.3);
-            border-radius: var(--radius-md);
-            padding: 12px 16px;
-            margin-bottom: 18px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            cursor: pointer;
-        }
-        .ai-exam-box:hover {
-            border-color: var(--primary);
+            background: rgba(37, 99, 235, 0.08); border: 1px solid rgba(37, 99, 235, 0.3);
+            border-radius: var(--radius-md); padding: 12px 16px; margin-bottom: 18px;
+            display: flex; align-items: center; justify-content: space-between; cursor: pointer;
         }
         .ai-exam-title {
-            font-weight: 700;
-            font-size: 0.88rem;
-            color: var(--text-primary);
-            display: flex;
-            align-items: center;
-            gap: 8px;
+            font-weight: 700; font-size: 0.88rem; color: var(--text-primary); display: flex; align-items: center; gap: 8px;
         }
-        .ai-exam-desc {
-            font-size: 0.76rem;
-            color: var(--text-secondary);
-            margin-top: 2px;
-        }
+        .ai-exam-desc { font-size: 0.76rem; color: var(--text-secondary); margin-top: 2px; }
 
         .btn-primary {
-            width: 100%;
-            background: var(--primary);
-            color: #ffffff;
-            border: none;
-            padding: 13px;
-            font-size: 0.96rem;
-            font-weight: 700;
-            border-radius: var(--radius-md);
-            cursor: pointer;
-            transition: all 0.2s;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 8px;
-            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+            width: 100%; background: var(--primary); color: #ffffff; border: none;
+            padding: 13px; font-size: 0.96rem; font-weight: 700; border-radius: var(--radius-md);
+            cursor: pointer; transition: all 0.2s; display: flex; align-items: center;
+            justify-content: center; gap: 8px; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
         }
-        .btn-primary:hover:not(:disabled) {
-            background: var(--primary-hover);
-            transform: translateY(-1px);
-        }
-        .btn-primary:disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
-        }
+        .btn-primary:hover:not(:disabled) { background: var(--primary-hover); transform: translateY(-1px); }
+        .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; }
 
         .result-container {
-            margin-top: 22px;
-            padding: 18px;
-            background: var(--surface-sub);
-            border-radius: var(--radius-lg);
-            border: 1px solid var(--border);
-            display: none;
+            margin-top: 22px; padding: 18px; background: var(--surface-sub);
+            border-radius: var(--radius-lg); border: 1px solid var(--border); display: none;
         }
-        .audio-player {
-            width: 100%;
-            margin-bottom: 14px;
-            display: block;
-        }
+        .audio-player { width: 100%; margin-bottom: 14px; display: block; }
         .btn-secondary {
-            background: #10b981;
-            color: #ffffff;
-            border: none;
-            padding: 8px 16px;
-            border-radius: var(--radius-md);
-            cursor: pointer;
-            text-decoration: none;
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            font-weight: 700;
-            font-size: 0.84rem;
-        }
-        .btn-secondary:hover {
-            background: #059669;
+            background: #10b981; color: #ffffff; border: none; padding: 8px 16px;
+            border-radius: var(--radius-md); cursor: pointer; text-decoration: none;
+            display: inline-flex; align-items: center; gap: 8px; font-weight: 700; font-size: 0.84rem;
         }
 
-        /* 试题与折叠答案卡片 */
         .exam-card {
-            margin-top: 20px;
-            background: var(--surface);
-            border: 1.5px solid var(--border);
-            border-radius: var(--radius-lg);
-            padding: 18px;
-            display: none;
+            margin-top: 20px; background: var(--surface); border: 1.5px solid var(--border);
+            border-radius: var(--radius-lg); padding: 18px; display: none;
         }
         .exam-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 12px;
-            padding-bottom: 10px;
-            border-bottom: 1px solid var(--border);
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
         }
         .exam-badge {
-            background: rgba(37, 99, 235, 0.15);
-            color: var(--primary);
-            font-size: 0.74rem;
-            font-weight: 700;
-            padding: 2px 8px;
-            border-radius: 999px;
+            background: rgba(37, 99, 235, 0.15); color: var(--primary); font-size: 0.74rem;
+            font-weight: 700; padding: 2px 8px; border-radius: 999px;
         }
         .exam-body {
-            background: var(--surface-sub);
-            border-radius: var(--radius-md);
-            padding: 14px;
-            font-family: inherit;
-            font-size: 0.88rem;
-            line-height: 1.7;
-            white-space: pre-wrap;
-            max-height: 420px;
-            overflow-y: auto;
-            border: 1px solid var(--border);
+            background: var(--surface-sub); border-radius: var(--radius-md); padding: 14px;
+            font-family: inherit; font-size: 0.88rem; line-height: 1.7; white-space: pre-wrap;
+            max-height: 420px; overflow-y: auto; border: 1px solid var(--border);
         }
         .btn-copy {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            color: var(--text-primary);
-            padding: 5px 12px;
-            font-size: 0.78rem;
-            font-weight: 600;
-            border-radius: var(--radius-sm);
+            background: var(--surface); border: 1px solid var(--border); color: var(--text-primary);
+            padding: 5px 12px; font-size: 0.78rem; font-weight: 600; border-radius: var(--radius-sm);
             cursor: pointer;
         }
-        .btn-copy:hover {
-            color: var(--primary);
-            border-color: var(--primary);
-        }
+        .btn-copy:hover { color: var(--primary); border-color: var(--primary); }
 
-        /* 答案折叠区样式 */
         .answer-container {
-            margin-top: 16px;
-            border-top: 1px dashed var(--border);
-            padding-top: 14px;
+            margin-top: 16px; border-top: 1px dashed var(--border); padding-top: 14px;
         }
         .btn-toggle-answer {
-            width: 100%;
-            background: var(--surface-sub);
-            border: 1.5px solid var(--border);
-            color: var(--text-primary);
-            padding: 10px 14px;
-            border-radius: var(--radius-md);
-            font-size: 0.86rem;
-            font-weight: 700;
-            cursor: pointer;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            transition: all 0.2s;
+            width: 100%; background: var(--surface-sub); border: 1.5px solid var(--border);
+            color: var(--text-primary); padding: 10px 14px; border-radius: var(--radius-md);
+            font-size: 0.86rem; font-weight: 700; cursor: pointer; display: flex;
+            justify-content: space-between; align-items: center; transition: all 0.2s;
         }
         .btn-toggle-answer:hover {
-            background: rgba(37, 99, 235, 0.1);
-            border-color: var(--primary);
-            color: var(--primary);
+            background: rgba(37, 99, 235, 0.1); border-color: var(--primary); color: var(--primary);
         }
-        .answer-collapse-box {
-            display: none;
-            margin-top: 12px;
-            animation: fadeIn 0.25s ease-in-out;
-        }
+        .answer-collapse-box { display: none; margin-top: 12px; }
         .answer-body {
-            background: rgba(16, 185, 129, 0.05);
-            border-color: rgba(16, 185, 129, 0.3);
+            background: rgba(16, 185, 129, 0.05); border-color: rgba(16, 185, 129, 0.3);
         }
 
         .loading-spinner {
-            width: 26px;
-            height: 26px;
-            border: 3px solid var(--border);
-            border-top: 3px solid var(--primary);
-            border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-            margin: 10px auto;
+            width: 26px; height: 26px; border: 3px solid var(--border);
+            border-top: 3px solid var(--primary); border-radius: 50%;
+            animation: spin 0.8s linear infinite; margin: 10px auto;
         }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
     </style>
 </head>
 <body>
@@ -523,7 +306,7 @@ const HTML_PAGE = `
                 <div class="countdown-exact" id="yearExact">剩余 0天 00:00:00</div>
             </div>
             <div class="countdown-card">
-                <div class="countdown-label">28年夏季高考 (至6月7日)</div>
+                <div class="countdown-label">28年高考英语听说 (3月模考)</div>
                 <div class="countdown-percentage" id="gaokaoPercent">0.00%</div>
                 <div class="countdown-exact" id="gaokaoExact">剩余 0天 00:00:00</div>
             </div>
@@ -534,35 +317,28 @@ const HTML_PAGE = `
                 <div class="form-group">
                     <label class="form-label">输入模式</label>
                     <div class="input-method-tabs">
-                        <button type="button" class="tab-btn" id="textTab">手动输入</button>
-                        <button type="button" class="tab-btn active" id="ssmlTab">&lt; &gt; SSML 剧本模式</button>
+                        <button type="button" class="tab-btn" id="textTab">手动输入纯文本</button>
+                        <button type="button" class="tab-btn active" id="ssmlTab">&lt; &gt; SSML 对话/独白模式</button>
                     </div>
                 </div>
 
                 <div class="form-group" id="textArea" style="display: none;">
                     <label class="form-label" for="textInput">文本内容</label>
-                    <textarea class="form-textarea" id="textInput" placeholder="输入要转换的文本..."></textarea>
+                    <textarea class="form-textarea" id="textInput" placeholder="在此输入英文材料..."></textarea>
                 </div>
 
                 <div class="form-group" id="ssmlArea">
-                    <div class="template-picker">
-                        <label class="form-label" style="margin:0; min-width:80px;">快速模板:</label>
-                        <select class="template-select" id="templateSelect">
-                            <option value="">载入预设英语人机对话考试题型...</option>
-                            <option value="examDemo" selected>中高考人机对话 (Part B 角色扮演 + Part C 故事复述)</option>
-                        </select>
-                    </div>
+                    <label class="form-label">SSML 材料编辑 (支持男女声交替)</label>
                     <textarea class="form-textarea ssml-editor" id="ssmlInput"></textarea>
                 </div>
 
                 <div class="controls-grid">
                     <div class="form-group">
-                        <label class="form-label" for="voiceSelect">发音人 (通用)</label>
+                        <label class="form-label" for="voiceSelect">默认播音音色</label>
                         <select class="form-select" id="voiceSelect">
-                            <option value="en-US-GuyNeural" selected>Guy (美语男声 - 常用旁白/男考生)</option>
-                            <option value="en-US-JennyNeural">Jenny (美语女声 - 常用对话/女考生)</option>
+                            <option value="en-US-GuyNeural" selected>Guy (美式男声 - 标准旁白/播报)</option>
+                            <option value="en-US-JennyNeural">Jenny (美式女声 - 对话角色)</option>
                             <option value="zh-CN-YunxiNeural">云希 (中文标准普通话)</option>
-                            <option value="zh-CN-XiaoxiaoNeural">晓晓 (中文温柔女声)</option>
                         </select>
                     </div>
 
@@ -570,7 +346,7 @@ const HTML_PAGE = `
                         <label class="form-label" for="formatSelect">音频品质</label>
                         <select class="form-select" id="formatSelect">
                             <option value="audio-24khz-160kbitrate-mono-mp3" selected>MP3 高保真 (160 kbps)</option>
-                            <option value="riff-24khz-16bit-mono-pcm">WAV 无损音频 (24kHz 16Bit)</option>
+                            <option value="riff-24khz-16bit-mono-pcm">WAV 无损原音 (24kHz 16Bit)</option>
                         </select>
                     </div>
 
@@ -594,10 +370,10 @@ const HTML_PAGE = `
                 <label class="ai-exam-box" for="aiExamToggle">
                     <div>
                         <div class="ai-exam-title">
-                            <span>✨</span> 开启 DeepSeek 智能听说命题 (人机对话逆向出题)
+                            <span>✨</span> 开启广东高考听说 AI 逆向命题 (DeepSeek 驱动)
                         </div>
                         <div class="ai-exam-desc">
-                            基于输入对话严格逆向生成 Part B (三问五答) 与 Part C 原题，答案默认折叠保护。
+                            严格按广东 COT 规范输出：三问中文指令、电脑答语、五答信息链分布，以及时序关键词与复述要点。
                         </div>
                     </div>
                     <input type="checkbox" id="aiExamToggle" style="width: 20px; height: 20px; accent-color: var(--primary); cursor: pointer;" checked>
@@ -605,53 +381,53 @@ const HTML_PAGE = `
 
                 <button type="submit" class="btn-primary" id="generateBtn">
                     <span>🎙️</span>
-                    <span>立即开始合成 (与同步出题)</span>
+                    <span>立即开始合成并生成标准考卷</span>
                 </button>
             </form>
 
             <div id="result" class="result-container">
                 <div id="audioLoading" style="display: none; text-align: center; padding: 12px 0;">
                     <div class="loading-spinner"></div>
-                    <div style="font-size:0.84rem; color:var(--text-secondary);">正在合成音频并建立流式连接...</div>
+                    <div style="font-size:0.84rem; color:var(--text-secondary);">正在合成音频并建立传输流...</div>
                 </div>
 
                 <div id="audioSuccess" style="display: none;">
                     <div style="font-size:0.85rem; font-weight:700; color:#10b981; margin-bottom:8px; display:flex; align-items:center; gap:6px;">
-                        <span>✓</span> 音频生成完毕
+                        <span>✓</span> 考场听力音频已就绪
                     </div>
                     <audio id="audioPlayer" class="audio-player" controls preload="auto"></audio>
-                    <a id="downloadBtn" class="btn-secondary" download="speech.mp3">
+                    <a id="downloadBtn" class="btn-secondary" download="cot_exam_audio.mp3">
                         <span>📥</span>
-                        <span>下载音频文件</span>
+                        <span>下载听力音频 (MP3)</span>
                     </a>
                 </div>
             </div>
 
-            <!-- 试题展示区 -->
+            <!-- 试题看板 -->
             <div id="examCard" class="exam-card">
                 <div class="exam-header">
                     <div style="display:flex; align-items:center; gap:8px;">
-                        <span style="font-weight:700; font-size:0.92rem;">📝 英语听说考试标准试卷</span>
+                        <span style="font-weight:700; font-size:0.92rem;">📝 广东省高考英语听说考试标准试题</span>
                         <span class="exam-badge" id="examBadge">DeepSeek 命题中...</span>
                     </div>
                     <button type="button" class="btn-copy" id="copyExamBtn">📋 复制试题</button>
                 </div>
                 <div id="examLoading" style="display:none; text-align:center; padding:18px 0;">
                     <div class="loading-spinner"></div>
-                    <div style="font-size:0.82rem; color:var(--text-secondary);">DeepSeek 正在解析对话逻辑并组织命题点...</div>
+                    <div style="font-size:0.82rem; color:var(--text-secondary);">DeepSeek 正在严格按广东听说命题细则研制考卷...</div>
                 </div>
                 
                 <pre class="exam-body" id="examBody"></pre>
 
-                <!-- 答案折叠区 -->
+                <!-- 答案与范文折叠保护区 -->
                 <div class="answer-container" id="answerContainer" style="display: none;">
                     <button type="button" class="btn-toggle-answer" id="toggleAnswerBtn">
-                        <span>💡 查看标准参考答案与高分范文</span>
+                        <span>💡 查看参考答案、电脑答语与评分要点</span>
                         <span id="answerToggleIcon">▼ 点击展开</span>
                     </button>
                     <div class="answer-collapse-box" id="answerCollapseBox">
                         <div style="display:flex; justify-content:flex-end; margin-bottom:8px;">
-                            <button type="button" class="btn-copy" id="copyAnswerBtn">📋 复制答案</button>
+                            <button type="button" class="btn-copy" id="copyAnswerBtn">📋 复制答案与范文</button>
                         </div>
                         <pre class="exam-body answer-body" id="answerBody"></pre>
                     </div>
@@ -735,7 +511,7 @@ const HTML_PAGE = `
             document.getElementById('yearPercent').textContent = ((remYear / (yEnd - yStart)) * 100).toFixed(2) + '%';
             document.getElementById('yearExact').textContent = '剩余 ' + Math.floor(remYear / 86400000) + '天';
 
-            const gkTarget = new Date(2028, 5, 7, 9, 0, 0).getTime();
+            const gkTarget = new Date(2028, 2, 10, 9, 0, 0).getTime();
             const remGk = Math.max(0, gkTarget - nowMs);
             document.getElementById('gaokaoPercent').textContent = ((remGk / (gkTarget - new Date(2025, 8, 1).getTime())) * 100).toFixed(2) + '%';
             document.getElementById('gaokaoExact').textContent = '剩余 ' + Math.floor(remGk / 86400000) + '天';
@@ -765,19 +541,17 @@ const HTML_PAGE = `
         speedInput.oninput = function() { document.getElementById('speedVal').textContent = parseFloat(speedInput.value).toFixed(2) + 'x'; };
         pitchInput.oninput = function() { document.getElementById('pitchVal').textContent = (pitchInput.value >= 0 ? '+' : '') + pitchInput.value + 'Hz'; };
 
-        // 复制试题与答案
         document.getElementById('copyExamBtn').onclick = function() {
             const content = document.getElementById('examBody').textContent;
             if (!content) return;
-            navigator.clipboard.writeText(content).then(() => alert('试题已成功复制到剪贴板！'));
+            navigator.clipboard.writeText(content).then(() => alert('试题已成功复制！'));
         };
         document.getElementById('copyAnswerBtn').onclick = function() {
             const content = document.getElementById('answerBody').textContent;
             if (!content) return;
-            navigator.clipboard.writeText(content).then(() => alert('参考答案已成功复制到剪贴板！'));
+            navigator.clipboard.writeText(content).then(() => alert('参考答案已成功复制！'));
         };
 
-        // 折叠/展开答案交互
         const toggleAnswerBtn = document.getElementById('toggleAnswerBtn');
         const answerCollapseBox = document.getElementById('answerCollapseBox');
         const answerToggleIcon = document.getElementById('answerToggleIcon');
@@ -828,7 +602,7 @@ const HTML_PAGE = `
                 examCard.style.display = 'none';
             }
 
-            // 1. 发起音频合成
+            // 1. 合成听力音频
             const audioTask = fetch('/v1/audio/speech', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -852,7 +626,7 @@ const HTML_PAGE = `
                 alert('音频生成异常: ' + err.message);
             });
 
-            // 2. 发起 DeepSeek AI 试题与答案生成
+            // 2. DeepSeek 生成广东高考 COT 试卷
             let examTask = Promise.resolve();
             if (enableExam) {
                 examTask = fetch('/api/generate-exam', {
@@ -869,9 +643,9 @@ const HTML_PAGE = `
                         examBody.textContent = data.exam;
                         if (data.answer) {
                             answerBody.textContent = data.answer;
-                            answerContainer.style.display = 'block'; // 呈现折叠按钮
+                            answerContainer.style.display = 'block';
                         }
-                        examBadge.textContent = '生成完毕';
+                        examBadge.textContent = '命题完毕';
                     }
                 }).catch(err => {
                     examLoading.style.display = 'none';
@@ -904,10 +678,7 @@ async function handleRequest(request, env, ctx) {
 
     if (path === "/" || path === "/index.html") {
         return new Response(HTML_PAGE, {
-            headers: {
-                "Content-Type": "text/html; charset=utf-8",
-                ...makeCORSHeaders()
-            }
+            headers: { "Content-Type": "text/html; charset=utf-8", ...makeCORSHeaders() }
         });
     }
 
@@ -929,7 +700,7 @@ async function handleRequest(request, env, ctx) {
         }
     }
 
-    // ==================== DeepSeek 智能命题与答案双轨生成 ====================
+    // ==================== DeepSeek 广东高考听说考试深度命题 ====================
     if (path === "/api/generate-exam") {
         if (!env.AI) {
             return new Response(JSON.stringify({
@@ -949,15 +720,35 @@ async function handleRequest(request, env, ctx) {
                 });
             }
 
-            const systemPrompt = `你是一名资深的英语听说人机对话考试命题专家。
-你必须严格根据用户提供的 SSML 对话与独白剧本进行命题，所有题目和答案必须100%忠于文本材料中的事实细节，绝不能凭空捏造。
+            // 深度注入广东高考英语听说考试 (COT) 命题细则
+            const systemPrompt = `你是一名精通广东省普通高考英语听说考试（Computerized Oral Test，简称 COT）命题规则与智能机评算法的权威命题专家。
+用户会提供一段 SSML 剧本或对话文本，通常包含：
+1. Part B 角色扮演材料（双人交替日常对话）
+2. Part C 故事复述材料（单人独白记叙文）
 
-输入材料结构通常包含两部分：
-1. Part B：角色扮演对话（通常由两个角色交替展开，包含活动、时间、地点、要求等）。
-2. Part C：故事复述独白（一个角色陈述的完整记叙故事）。
+请严格执行【广东省高考英语听说考试】命题规范与信息依赖链条进行命题：
+
+【命题核心铁律】：
+1. Part B 角色扮演（满分16分）：
+   - 情景介绍：交代考生角色（如“你是学生李华”）和考试任务。
+   - 三问（中文提示）：根据情景，给出3个引导考生向对方提问的中文提示。
+   - 电脑答语（关键闭环）：必须基于输入对话的事实，提炼或给出【电脑对这3个提问的英文答语】（Computer's Response 1, 2, 3）。
+   - 五答（英文听力问答）题源铁律：
+     * Question 1、Question 2：问题答案【必须且只能】来自初始原对话的事实！
+     * Question 3：问题答案【必须且只能】针对【电脑对第1问的答语】展开提问！
+     * Question 4：问题答案【必须且只能】针对【电脑对第2问的答语】展开提问！
+     * Question 5：问题答案【必须且只能】针对【电脑对第3问的答语】展开提问！
+2. Part C 故事复述（满分24分）：
+   - 故事梗概：用 30-50 字中文精炼总结短文情节（包含主人公、起因、高潮、结果）。
+   - 关键词：严格精选【5个中英文对照关键词/词组】，且必须【严格按照故事时间发生先后顺序】排列！
+   - 核心采分点：提炼 8-10 个机评评分要点（Information Points）。
+3. 答案规范：
+   - 三问标准问句：提供规范直接疑问句（疑问词+助动词+主语+动词），注意时态。
+   - 五答标准答案：提供机评认可的【完整句】与【极简采分答语】。
+   - 高分复述范文：必须保持【一般过去时（Past Tense）】一致性，词数100-120词，逻辑词衔接顺畅。
 
 【输出格式要求】：
-你必须将结果严格划分为【原题】和【参考答案】两部分，并分别用 <EXAM> 和 <ANSWER> 标签严格包裹。禁止在标签外添加任何多余的开场白或解释。
+严格分为 <EXAM> 试题 和 <ANSWER> 参考答案 两部分，禁止添加标签外的多余文字。
 
 规范范本：
 <EXAM>
@@ -970,68 +761,82 @@ async function handleRequest(request, env, ctx) {
 
 三问（中文提示）
 
-1. [根据对话细节，拟定第1个中文提问提示，要求考生用英文提问]
+1. [中文提问提示 1]
 
-2. [根据对话细节，拟定第2个中文提问提示]
+2. [中文提问提示 2]
 
-3. [根据对话细节，拟定第3个中文提问提示]
+3. [中文提问提示 3]
 
 五答（听力问答）
 
-1. [根据对话中的事实，提出第1个英文听力问题]
+1. [基于原对话事实的英文提问 1]
 
-2. [根据对话中的事实，提出第2个英文听力问题]
+2. [基于原对话事实的英文提问 2]
 
-3. [根据对话中的事实，提出第3个英文听力问题]
+3. [基于电脑对第1问答语的英文提问 3]
 
-4. [根据对话中的事实，提出第4个英文听力问题]
+4. [基于电脑对第2问答语的英文提问 4]
 
-5. [根据对话中的事实，提出第5个英文听力问题]
+5. [基于电脑对第3问答语的英文提问 5]
 
 三、Part C 故事复述 原题
 
 故事梗概
 
-[用一句话中文精炼概括 Part C 故事的主要情节]
+[30-50字中文精炼梗概]
 
 关键词
 
-[提炼 Part C 中的 5-7 个核心英文单词或短语，以英文逗号分隔]
+[关键词1], [关键词2], [关键词3], [关键词4], [关键词5]
 </EXAM>
 
 <ANSWER>
+Part B 电脑答语（听力出题源）
+
+1. [针对三问第1题，电脑播放的答语]
+
+2. [针对三问第2题，电脑播放的答语]
+
+3. [针对三问第3题，电脑播放的答语]
+
 Part B 三问标准句式
 
-1. [三问第1题对应的标准英文问句]
+1. [三问第1题标准提问]
 
-2. [三问第2题对应的标准英文问句]
+2. [三问第2题标准提问]
 
-3. [三问第3题对应的标准英文问句]
+3. [三问第3题标准提问]
 
-Part B 五答标准简答
+Part B 五答标准答语
 
-1. [针对五答第1题的标准回答或简答]
+1. 完整句：[完整句答案] | 简答：[核心词]
 
-2. [针对五答第2题的标准回答]
+2. 完整句：[完整句答案] | 简答：[核心词]
 
-3. [针对五答第3题的标准回答]
+3. 完整句：[完整句答案] | 简答：[核心词]
 
-4. [针对五答第4题的标准回答]
+4. 完整句：[完整句答案] | 简答：[核心词]
 
-5. [针对五答第5题的标准回答]
+5. 完整句：[完整句答案] | 简答：[核心词]
 
-Part C 高分复述范文
+Part C 故事复述机评采分点
 
-[基于 Part C 故事事实，输出一篇语法准确、衔接自然的高分英语复述范文]
+1. [信息点 1]
+2. [信息点 2]
+...（共 8-10 个关键点）
+
+Part C 高分复述范文（全篇一般过去时）
+
+[100-120词高分记叙文范文]
 </ANSWER>`;
 
             const aiResponse = await env.AI.run("@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", {
                 messages: [
                     { role: "system", content: systemPrompt },
-                    { role: "user", content: `请基于以下材料严格出题及提供标准答案：\n\n${text}` }
+                    { role: "user", content: `请根据以下考试材料，严格遵循广东英语听说高考规则命题并研制标准答案：\n\n${text}` }
                 ],
-                max_tokens: 2500,
-                temperature: 0.4
+                max_tokens: 2800,
+                temperature: 0.35
             });
 
             // 过滤 DeepSeek-R1 的思考标签
@@ -1040,20 +845,11 @@ Part C 高分复述范文
             let examContent = rawOutput;
             let answerContent = "";
 
-            // 提取结构化标签
             const examMatch = rawOutput.match(/<EXAM>([\s\S]*?)<\/EXAM>/i);
             const answerMatch = rawOutput.match(/<ANSWER>([\s\S]*?)<\/ANSWER>/i);
 
-            if (examMatch) {
-                examContent = examMatch[1].trim();
-            }
-            if (answerMatch) {
-                answerContent = answerMatch[1].trim();
-            } else if (!examMatch && rawOutput.includes("答案：")) {
-                const parts = rawOutput.split("答案：");
-                examContent = parts[0].trim();
-                answerContent = parts[1].trim();
-            }
+            if (examMatch) examContent = examMatch[1].trim();
+            if (answerMatch) answerContent = answerMatch[1].trim();
 
             return new Response(JSON.stringify({
                 exam: examContent,
@@ -1063,7 +859,7 @@ Part C 高分复述范文
             });
         } catch (error) {
             console.error("DeepSeek 命题失败:", error);
-            return new Response(JSON.stringify({ error: error.message || "DeepSeek 服务异常" }), {
+            return new Response(JSON.stringify({ error: error.message || "DeepSeek 命题服务异常" }), {
                 status: 500,
                 headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
             });
@@ -1074,7 +870,7 @@ Part C 高分复述范文
         try {
             const requestBody = await request.json();
             const textContent = requestBody.input || requestBody.ssml || requestBody.text || "";
-            const rawVoice = requestBody.voice || "zh-CN-YunxiNeural";
+            const rawVoice = requestBody.voice || "en-US-GuyNeural";
             const voice = OPENAI_VOICE_MAP[rawVoice.toLowerCase()] || rawVoice;
             const rawFormat = (requestBody.response_format || requestBody.outputFormat || requestBody.format || "mp3").toLowerCase();
             const outputFormat = FORMAT_MAP[rawFormat] || "audio-24khz-160kbitrate-mono-mp3";
