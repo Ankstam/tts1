@@ -1,5 +1,6 @@
 /**
- * Cloudflare Worker: Edge TTS + DeepSeek 智能命题一体化网关
+ * Cloudflare Worker: Edge TTS + DeepSeek 智能听说命题一体化网关
+ * 功能：音频流式合成、题卷与折叠答案双轨生成、防击穿两级缓存
  */
 
 const TOKEN_REFRESH_BEFORE_EXPIRY = 3 * 60;
@@ -47,8 +48,8 @@ const HTML_PAGE = `
             --primary: #2563eb;
             --primary-hover: #1d4ed8;
             --bg: #0f172a;
-            --surface: rgba(255, 255, 255, 0.35);
-            --surface-sub: rgba(255, 255, 255, 0.22);
+            --surface: rgba(255, 255, 255, 0.38);
+            --surface-sub: rgba(255, 255, 255, 0.25);
             --text-primary: #0f172a;
             --text-secondary: #334155;
             --border: rgba(255, 255, 255, 0.55);
@@ -398,6 +399,7 @@ const HTML_PAGE = `
             background: #059669;
         }
 
+        /* 试题与折叠答案卡片 */
         .exam-card {
             margin-top: 20px;
             background: var(--surface);
@@ -448,6 +450,43 @@ const HTML_PAGE = `
             color: var(--primary);
             border-color: var(--primary);
         }
+
+        /* 答案折叠区样式 */
+        .answer-container {
+            margin-top: 16px;
+            border-top: 1px dashed var(--border);
+            padding-top: 14px;
+        }
+        .btn-toggle-answer {
+            width: 100%;
+            background: var(--surface-sub);
+            border: 1.5px solid var(--border);
+            color: var(--text-primary);
+            padding: 10px 14px;
+            border-radius: var(--radius-md);
+            font-size: 0.86rem;
+            font-weight: 700;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: all 0.2s;
+        }
+        .btn-toggle-answer:hover {
+            background: rgba(37, 99, 235, 0.1);
+            border-color: var(--primary);
+            color: var(--primary);
+        }
+        .answer-collapse-box {
+            display: none;
+            margin-top: 12px;
+            animation: fadeIn 0.25s ease-in-out;
+        }
+        .answer-body {
+            background: rgba(16, 185, 129, 0.05);
+            border-color: rgba(16, 185, 129, 0.3);
+        }
+
         .loading-spinner {
             width: 26px;
             height: 26px;
@@ -458,6 +497,7 @@ const HTML_PAGE = `
             margin: 10px auto;
         }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
     </style>
 </head>
 <body>
@@ -557,7 +597,7 @@ const HTML_PAGE = `
                             <span>✨</span> 开启 DeepSeek 智能听说命题 (人机对话逆向出题)
                         </div>
                         <div class="ai-exam-desc">
-                            基于 DeepSeek 驱动，精准提取上下文并按中高考听说标准格式生成 Part B (三问五答) 与 Part C。
+                            基于输入对话严格逆向生成 Part B (三问五答) 与 Part C 原题，答案默认折叠保护。
                         </div>
                     </div>
                     <input type="checkbox" id="aiExamToggle" style="width: 20px; height: 20px; accent-color: var(--primary); cursor: pointer;" checked>
@@ -587,10 +627,11 @@ const HTML_PAGE = `
                 </div>
             </div>
 
+            <!-- 试题展示区 -->
             <div id="examCard" class="exam-card">
                 <div class="exam-header">
                     <div style="display:flex; align-items:center; gap:8px;">
-                        <span style="font-weight:700; font-size:0.92rem;">📝 英语听说考试标准试卷 (DeepSeek 生成)</span>
+                        <span style="font-weight:700; font-size:0.92rem;">📝 英语听说考试标准试卷</span>
                         <span class="exam-badge" id="examBadge">DeepSeek 命题中...</span>
                     </div>
                     <button type="button" class="btn-copy" id="copyExamBtn">📋 复制试题</button>
@@ -599,7 +640,22 @@ const HTML_PAGE = `
                     <div class="loading-spinner"></div>
                     <div style="font-size:0.82rem; color:var(--text-secondary);">DeepSeek 正在解析对话逻辑并组织命题点...</div>
                 </div>
+                
                 <pre class="exam-body" id="examBody"></pre>
+
+                <!-- 答案折叠区 -->
+                <div class="answer-container" id="answerContainer" style="display: none;">
+                    <button type="button" class="btn-toggle-answer" id="toggleAnswerBtn">
+                        <span>💡 查看标准参考答案与高分范文</span>
+                        <span id="answerToggleIcon">▼ 点击展开</span>
+                    </button>
+                    <div class="answer-collapse-box" id="answerCollapseBox">
+                        <div style="display:flex; justify-content:flex-end; margin-bottom:8px;">
+                            <button type="button" class="btn-copy" id="copyAnswerBtn">📋 复制答案</button>
+                        </div>
+                        <pre class="exam-body answer-body" id="answerBody"></pre>
+                    </div>
+                </div>
             </div>
         </div>
     </main>
@@ -709,10 +765,26 @@ const HTML_PAGE = `
         speedInput.oninput = function() { document.getElementById('speedVal').textContent = parseFloat(speedInput.value).toFixed(2) + 'x'; };
         pitchInput.oninput = function() { document.getElementById('pitchVal').textContent = (pitchInput.value >= 0 ? '+' : '') + pitchInput.value + 'Hz'; };
 
+        // 复制试题与答案
         document.getElementById('copyExamBtn').onclick = function() {
             const content = document.getElementById('examBody').textContent;
             if (!content) return;
             navigator.clipboard.writeText(content).then(() => alert('试题已成功复制到剪贴板！'));
+        };
+        document.getElementById('copyAnswerBtn').onclick = function() {
+            const content = document.getElementById('answerBody').textContent;
+            if (!content) return;
+            navigator.clipboard.writeText(content).then(() => alert('参考答案已成功复制到剪贴板！'));
+        };
+
+        // 折叠/展开答案交互
+        const toggleAnswerBtn = document.getElementById('toggleAnswerBtn');
+        const answerCollapseBox = document.getElementById('answerCollapseBox');
+        const answerToggleIcon = document.getElementById('answerToggleIcon');
+        toggleAnswerBtn.onclick = function() {
+            const isHidden = answerCollapseBox.style.display === 'none' || answerCollapseBox.style.display === '';
+            answerCollapseBox.style.display = isHidden ? 'block' : 'none';
+            answerToggleIcon.textContent = isHidden ? '▲ 点击收起' : '▼ 点击展开';
         };
 
         document.getElementById('ttsForm').onsubmit = async function(e) {
@@ -735,6 +807,8 @@ const HTML_PAGE = `
             const examLoading = document.getElementById('examLoading');
             const examBody = document.getElementById('examBody');
             const examBadge = document.getElementById('examBadge');
+            const answerContainer = document.getElementById('answerContainer');
+            const answerBody = document.getElementById('answerBody');
 
             generateBtn.disabled = true;
             resultBox.style.display = 'block';
@@ -745,11 +819,16 @@ const HTML_PAGE = `
                 examCard.style.display = 'block';
                 examLoading.style.display = 'block';
                 examBody.textContent = '';
+                answerBody.textContent = '';
+                answerContainer.style.display = 'none';
+                answerCollapseBox.style.display = 'none';
+                answerToggleIcon.textContent = '▼ 点击展开';
                 examBadge.textContent = 'DeepSeek 命题中...';
             } else {
                 examCard.style.display = 'none';
             }
 
+            // 1. 发起音频合成
             const audioTask = fetch('/v1/audio/speech', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -773,6 +852,7 @@ const HTML_PAGE = `
                 alert('音频生成异常: ' + err.message);
             });
 
+            // 2. 发起 DeepSeek AI 试题与答案生成
             let examTask = Promise.resolve();
             if (enableExam) {
                 examTask = fetch('/api/generate-exam', {
@@ -786,7 +866,11 @@ const HTML_PAGE = `
                         examBody.textContent = '试题生成失败: ' + (data.error || '未知错误');
                         examBadge.textContent = '失败';
                     } else {
-                        examBody.textContent = data.result;
+                        examBody.textContent = data.exam;
+                        if (data.answer) {
+                            answerBody.textContent = data.answer;
+                            answerContainer.style.display = 'block'; // 呈现折叠按钮
+                        }
                         examBadge.textContent = '生成完毕';
                     }
                 }).catch(err => {
@@ -845,11 +929,11 @@ async function handleRequest(request, env, ctx) {
         }
     }
 
-    // ==================== DeepSeek AI 试题生成 ====================
+    // ==================== DeepSeek 智能命题与答案双轨生成 ====================
     if (path === "/api/generate-exam") {
         if (!env.AI) {
             return new Response(JSON.stringify({
-                error: "未在 wrangler.toml 中开启 Workers AI 绑定。请添加 [ai] binding = 'AI'"
+                error: "未在 wrangler.toml 中绑定 Workers AI。请配置 [ai] binding = 'AI'"
             }), {
                 status: 500,
                 headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
@@ -866,12 +950,17 @@ async function handleRequest(request, env, ctx) {
             }
 
             const systemPrompt = `你是一名资深的英语听说人机对话考试命题专家。
-用户会提供一段 SSML 剧本或对话文本（包含两部分：Part B 角色扮演对话，Part C 故事复述短文）。
-请深入理解文本的上下文细节，严格按照中考/高考人机对话考试的规范格式进行命题。
+你必须严格根据用户提供的 SSML 对话与独白剧本进行命题，所有题目和答案必须100%忠于文本材料中的事实细节，绝不能凭空捏造。
 
-【输出规范】：
-严格按照以下格式直接输出试题，禁止包含多余的问候、解释或前导说明：
+输入材料结构通常包含两部分：
+1. Part B：角色扮演对话（通常由两个角色交替展开，包含活动、时间、地点、要求等）。
+2. Part C：故事复述独白（一个角色陈述的完整记叙故事）。
 
+【输出格式要求】：
+你必须将结果严格划分为【原题】和【参考答案】两部分，并分别用 <EXAM> 和 <ANSWER> 标签严格包裹。禁止在标签外添加任何多余的开场白或解释。
+
+规范范本：
+<EXAM>
 二、Part B 角色扮演 原题
 
 情景介绍
@@ -881,42 +970,95 @@ async function handleRequest(request, env, ctx) {
 
 三问（中文提示）
 
-1. [根据对话中的关键点，提出第1个中文提问提示]
-2. [根据对话中的关键点，提出第2个中文提问提示]
-3. [根据对话中的关键点，提出第3个中文提问提示]
+1. [根据对话细节，拟定第1个中文提问提示，要求考生用英文提问]
+
+2. [根据对话细节，拟定第2个中文提问提示]
+
+3. [根据对话细节，拟定第3个中文提问提示]
 
 五答（听力问答）
 
-1. [根据对话细节，提出第1个英文问句]
-2. [根据对话细节，提出第2个英文问句]
-3. [根据对话细节，提出第3个英文问句]
-4. [根据对话细节，提出第4个英文问句]
-5. [根据对话细节，提出第5个英文问句]
+1. [根据对话中的事实，提出第1个英文听力问题]
+
+2. [根据对话中的事实，提出第2个英文听力问题]
+
+3. [根据对话中的事实，提出第3个英文听力问题]
+
+4. [根据对话中的事实，提出第4个英文听力问题]
+
+5. [根据对话中的事实，提出第5个英文听力问题]
 
 三、Part C 故事复述 原题
 
 故事梗概
 
-[用一句话精炼概括短文故事的核心情节]
+[用一句话中文精炼概括 Part C 故事的主要情节]
 
 关键词
 
-[列出5-7个核心考点英文单词或短语，用英文逗号分隔]`;
+[提炼 Part C 中的 5-7 个核心英文单词或短语，以英文逗号分隔]
+</EXAM>
 
-            // 调用 Cloudflare Workers AI 原生 DeepSeek 模型
+<ANSWER>
+Part B 三问标准句式
+
+1. [三问第1题对应的标准英文问句]
+
+2. [三问第2题对应的标准英文问句]
+
+3. [三问第3题对应的标准英文问句]
+
+Part B 五答标准简答
+
+1. [针对五答第1题的标准回答或简答]
+
+2. [针对五答第2题的标准回答]
+
+3. [针对五答第3题的标准回答]
+
+4. [针对五答第4题的标准回答]
+
+5. [针对五答第5题的标准回答]
+
+Part C 高分复述范文
+
+[基于 Part C 故事事实，输出一篇语法准确、衔接自然的高分英语复述范文]
+</ANSWER>`;
+
             const aiResponse = await env.AI.run("@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", {
                 messages: [
                     { role: "system", content: systemPrompt },
-                    { role: "user", content: `请根据以下考试材料进行命题：\n\n${text}` }
+                    { role: "user", content: `请基于以下材料严格出题及提供标准答案：\n\n${text}` }
                 ],
-                max_tokens: 2048,
-                temperature: 0.6
+                max_tokens: 2500,
+                temperature: 0.4
             });
 
-            // 过滤 DeepSeek-R1 的思考标签，仅保留纯净试卷排版
-            let cleanResult = (aiResponse.response || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+            // 过滤 DeepSeek-R1 的思考标签
+            let rawOutput = (aiResponse.response || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 
-            return new Response(JSON.stringify({ result: cleanResult }), {
+            let examContent = rawOutput;
+            let answerContent = "";
+
+            // 提取结构化标签
+            const examMatch = rawOutput.match(/<EXAM>([\s\S]*?)<\/EXAM>/i);
+            const answerMatch = rawOutput.match(/<ANSWER>([\s\S]*?)<\/ANSWER>/i);
+
+            if (examMatch) {
+                examContent = examMatch[1].trim();
+            }
+            if (answerMatch) {
+                answerContent = answerMatch[1].trim();
+            } else if (!examMatch && rawOutput.includes("答案：")) {
+                const parts = rawOutput.split("答案：");
+                examContent = parts[0].trim();
+                answerContent = parts[1].trim();
+            }
+
+            return new Response(JSON.stringify({
+                exam: examContent,
+                answer: answerContent
+            }), {
                 headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
             });
         } catch (error) {
