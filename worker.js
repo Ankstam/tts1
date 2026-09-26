@@ -1,8 +1,6 @@
 /**
  * Cloudflare Worker: 广东高考英语听说考试 (COT) 命题与 Edge TTS 一体化网关
- * 升级特性：
- * 1. 彻底解决 Edge TTS 裸露 break 与注释造成的 HTTP 400
- * 2. 支持前端直接填入 Groq API Key 并保存在 localStorage，免去 GitHub 泄露作废风险
+ * 增强：适配 Groq 免费层 1000 OTPM 限额控制，修复 SSML 容错与浏览器端 Key 存储
  */
 
 const TOKEN_REFRESH_BEFORE_EXPIRY = 3 * 60;
@@ -42,108 +40,80 @@ const DEFAULT_COT_SYSTEM_PROMPT = `你是一名精通广东省普通高考英语
 1. Part B 角色扮演材料（双人交替日常对话）
 2. Part C 故事复述材料（单人独白记叙文）
 
-请严格执行【广东省高考英语听说考试】命题规范与信息依赖链条进行命题：
+请严格执行【广东省高考英语听说考试】命题规范与信息依赖链条进行命题，保持语言精炼，杜绝空行多余废话：
 
 【命题核心铁律】：
-1. Part B 角色扮演（满分16分）：
-   - 情景介绍：交代考生角色（如“你是学生李华”）和考试任务。
-   - 三问（中文提示）：根据情景，给出3个引导考生向对方提问的中文提示。
-   - 电脑答语（关键闭环）：必须基于输入对话的事实，提炼或给出【电脑对这3个提问的英文答语】（Computer's Response 1, 2, 3）。
-   - 五答（英文听力问答）题源铁律：
+1. Part B 角色扮演：
+   - 三问（中文提示）：给出3个引导考生向对方提问的中文提示。
+   - 电脑答语：必须基于输入对话事实，给出【电脑对这3个提问的英文答语】（Computer's Response 1, 2, 3）。
+   - 五答题源分布：
      * Question 1、Question 2：问题答案【必须且只能】来自初始原对话的事实！
-     * Question 3：问题答案【必须且只能】针对【电脑对第1问的答语】展开提问！
-     * Question 4：问题答案【必须且只能】针对【电脑对第2问的答语】展开提问！
-     * Question 5：问题答案【必须且只能】针对【电脑对第3问的答语】展开提问！
-2. Part C 故事复述（满分24分）：
-   - 故事梗概：用 30-50 字中文精炼总结短文情节（包含主人公、起因、高潮、结果）。
-   - 关键词：严格精选【5个中英文对照关键词/词组】，且必须【严格按照故事时间发生先后顺序】排列！
-   - 核心采分点：提炼 8-10 个机评评分要点（Information Points）。
+     * Question 3：问题答案【必须且只能】针对【电脑对第1问的答语】提问！
+     * Question 4：问题答案【必须且只能】针对【电脑对第2问的答语】提问！
+     * Question 5：问题答案【必须且只能】针对【电脑对第3问的答语】提问！
+2. Part C 故事复述：
+   - 故事梗概：用 30-50 字中文精炼总结短文情节。
+   - 关键词：严格精选【5个中英文对照关键词/词组】，必须【严格按照故事时间先后顺序】排列！
+   - 核心采分点：提炼 6-8 个机评采分关键信息点。
 3. 答案规范：
-   - 三问标准问句：提供规范直接疑问句（疑问词+助动词+主语+动词），注意时态。
-   - 五答标准答案：提供机评认可的【完整句】与【极简采分答语】。
-   - 高分复述范文：必须保持【一般过去时（Past Tense）】一致性，词数100-120词，逻辑词衔接顺畅。
+   - 三问标准句式：直接疑问句。
+   - 五答标准答案：完整句与核心简答。
+   - 复述范文：全篇严格使用一般过去时（Past Tense），约 100 词。
 
 【输出格式要求】：
-严格分为 <EXAM> 试题 和 <ANSWER> 参考答案 两部分，禁止添加标签外的多余文字。
+严格分为 <EXAM> 试题 和 <ANSWER> 参考答案 两部分：
 
-规范范本：
 <EXAM>
 二、Part B 角色扮演 原题
 
 情景介绍
-
 角色：你是学生
-任务：1. 根据中文提示，向对方提3个问题；2. 回答电脑的5个问题
+任务：1. 根据中文提示提3个问题；2. 回答电脑的5个问题
 
 三问（中文提示）
-
 1. [中文提问提示 1]
-
 2. [中文提问提示 2]
-
 3. [中文提问提示 3]
 
 五答（听力问答）
-
 1. [基于原对话事实的英文提问 1]
-
 2. [基于原对话事实的英文提问 2]
-
-3. [基于电脑对第1问答语的英文提问 3]
-
-4. [基于电脑对第2问答语的英文提问 4]
-
-5. [基于电脑对第3问答语的英文提问 5]
+3. [基于电脑对第1问答语的提问 3]
+4. [基于电脑对第2问答语的提问 4]
+5. [基于电脑对第3问答语的提问 5]
 
 三、Part C 故事复述 原题
 
 故事梗概
-
-[30-50字中文精炼梗概]
+[30-50字中文梗概]
 
 关键词
-
 [关键词1], [关键词2], [关键词3], [关键词4], [关键词5]
 </EXAM>
 
 <ANSWER>
-Part B 电脑答语（听力出题源）
-
-1. [针对三问第1题，电脑播放的答语]
-
-2. [针对三问第2题，电脑播放的答语]
-
-3. [针对三问第3题，电脑播放的答语]
+Part B 电脑答语
+1. [电脑答语 1]
+2. [电脑答语 2]
+3. [电脑答语 3]
 
 Part B 三问标准句式
-
-1. [三问第1题标准提问]
-
-2. [三问第2题标准提问]
-
-3. [三问第3题标准提问]
+1. [三问第1题]
+2. [三问第2题]
+3. [三问第3题]
 
 Part B 五答标准答语
+1. 完整句：[...] | 简答：[...]
+2. 完整句：[...] | 简答：[...]
+3. 完整句：[...] | 简答：[...]
+4. 完整句：[...] | 简答：[...]
+5. 完整句：[...] | 简答：[...]
 
-1. 完整句：[完整句答案] | 简答：[核心词]
+Part C 机评采分点
+1. [...] 2. [...] 3. [...] 4. [...] 5. [...] 6. [...]
 
-2. 完整句：[完整句答案] | 简答：[核心词]
-
-3. 完整句：[完整句答案] | 简答：[核心词]
-
-4. 完整句：[完整句答案] | 简答：[核心词]
-
-5. 完整句：[完整句答案] | 简答：[核心词]
-
-Part C 故事复述机评采分点
-
-1. [信息点 1]
-2. [信息点 2]
-...（共 8-10 个关键点）
-
-Part C 高分复述范文（全篇一般过去时）
-
-[100-120词高分记叙文范文]
+Part C 高分复述范文（全篇过去时）
+[...]
 </ANSWER>`;
 
 const HTML_PAGE = `
@@ -278,7 +248,6 @@ const HTML_PAGE = `
         .slider-val { font-size: 0.82rem; color: var(--primary); font-weight: 700; }
         .form-range { width: 100%; accent-color: var(--primary); cursor: pointer; }
 
-        /* AI 命题配置面板 */
         .ai-exam-box {
             background: rgba(37, 99, 235, 0.08); border: 1.5px solid rgba(37, 99, 235, 0.3);
             border-radius: var(--radius-lg); padding: 14px 16px; margin-bottom: 18px;
@@ -474,19 +443,19 @@ const HTML_PAGE = `
                                 </select>
                             </div>
                             <div id="groqModelWrap">
-                                <label class="form-label" style="font-size:0.80rem; margin-bottom:4px;">Groq 命题模型 (已按规模排序)</label>
+                                <label class="form-label" style="font-size:0.80rem; margin-bottom:4px;">Groq 命题模型</label>
                                 <select class="form-select" id="groqModelSelect">
-                                    <option value="openai/gpt-oss-120b" selected>openai/gpt-oss-120b (120B 旗舰级 · 推荐)</option>
-                                    <option value="qwen/qwen3.8-27b">qwen/qwen3.8-27b (27B 中英通义全能)</option>
+                                    <option value="openai/gpt-oss-120b" selected>openai/gpt-oss-120b (120B 旗舰 · 额度充裕推荐)</option>
+                                    <option value="qwen/qwen3.8-27b">qwen/qwen3.8-27b (27B 通义全能)</option>
                                     <option value="openai/gpt-oss-20b">openai/gpt-oss-20b (20B 极速推理轻量)</option>
                                 </select>
                             </div>
                         </div>
 
-                        <!-- 网页端安全输入 Groq API Key -->
+                        <!-- 浏览器本地存储 Groq Key -->
                         <div id="groqKeyWrap">
                             <label class="form-label" style="font-size:0.80rem; margin-bottom:4px;">
-                                Groq API Key (仅保存在本地浏览器，不经过 GitHub 代码库)
+                                Groq API Key (仅保存在本地浏览器，不通过代码库)
                             </label>
                             <input type="password" class="form-input" id="groqApiKeyInput" placeholder="输入在 console.groq.com 获取的 gsk_ 开头密钥...">
                         </div>
@@ -497,7 +466,7 @@ const HTML_PAGE = `
                             </button>
                             <div class="prompt-edit-container" id="promptEditBox">
                                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-                                    <span style="font-size:0.75rem; color:var(--text-secondary);">留空或未修改时，将自动调用系统内置的广东高考 COT 命题指示词</span>
+                                    <span style="font-size:0.75rem; color:var(--text-secondary);">留空或未修改时，自动调用系统内置的广东高考 COT 命题指示词</span>
                                     <button type="button" class="btn-copy" id="resetPromptBtn" style="padding:2px 8px; font-size:0.72rem;">↺ 恢复预设</button>
                                 </div>
                                 <textarea class="form-textarea" id="customPromptInput" style="min-height:160px; font-size:0.82rem; font-family:monospace;"></textarea>
@@ -567,7 +536,6 @@ const HTML_PAGE = `
         const DEFAULT_SYSTEM_PROMPT = ${JSON.stringify(DEFAULT_COT_SYSTEM_PROMPT)};
         document.getElementById('customPromptInput').value = DEFAULT_SYSTEM_PROMPT;
 
-        // 本地读写 Groq API Key
         const groqApiKeyInput = document.getElementById('groqApiKeyInput');
         groqApiKeyInput.value = localStorage.getItem('user_groq_key') || '';
         groqApiKeyInput.oninput = function() {
@@ -629,7 +597,6 @@ const HTML_PAGE = `
 
         document.getElementById('ssmlInput').value = DEFAULT_EXAM_SSML;
 
-        // 壁纸与主题
         const bg = document.getElementById('bgOverlay');
         if (bg) bg.style.backgroundImage = "url('/api/wallpaper?t=" + Date.now() + "')";
 
@@ -904,7 +871,6 @@ async function handleRequest(request, env, ctx) {
             let rawOutput = "";
 
             if (provider === "groq") {
-                // 优先从客户端传入的 Key 读取，次级从环境变量读取
                 const groqApiKey = apiKey || env.GROQ_API_KEY;
                 if (!groqApiKey) {
                     return new Response(JSON.stringify({
@@ -915,6 +881,7 @@ async function handleRequest(request, env, ctx) {
                     });
                 }
 
+                // 核心修复：将 max_tokens 严格限制在 950，杜绝超过 Groq 免费层的 1000 OTPM 阈值
                 const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
                     method: "POST",
                     headers: {
@@ -927,8 +894,8 @@ async function handleRequest(request, env, ctx) {
                             { role: "system", content: finalPrompt },
                             { role: "user", content: `请根据以下考试材料，严格遵循广东英语听说高考规则命题并研制标准答案：\n\n${text}` }
                         ],
-                        temperature: 0.35,
-                        max_tokens: 2800
+                        temperature: 0.3,
+                        max_tokens: 950
                     })
                 });
 
@@ -954,7 +921,7 @@ async function handleRequest(request, env, ctx) {
                         { role: "system", content: finalPrompt },
                         { role: "user", content: `请根据以下考试材料，严格遵循广东英语听说高考规则命题并研制标准答案：\n\n${text}` }
                     ],
-                    max_tokens: 2800,
+                    max_tokens: 2500,
                     temperature: 0.35
                 });
 
@@ -1091,14 +1058,12 @@ async function getVoice(text, voiceName, rate, pitch, volume, style, outputForma
     });
 }
 
-// 深度健壮 SSML 净化函数：清除全部注释，并将裸露在 voice 外部的 break 自动包装
+// 健壮级 SSML 语法容错：剔除所有注释，并安全包裹裸露在外面的 break 标签
 function sanitizeSsml(ssmlText, defaultVoice = "en-US-GuyNeural") {
     if (!ssmlText || !ssmlText.trim().startsWith('<speak')) return ssmlText;
 
-    // 1. 清除所有 XML 注释，避免注释截断正则或引起解析混乱
     let cleaned = ssmlText.replace(/<!--[\s\S]*?-->/g, '');
 
-    // 2. 识别所有游离在 </voice> 与 <voice> 之间、或 <speak> 与第一个 <voice> 之间的 <break>
     cleaned = cleaned.replace(/(<\/voice>|<speak[^>]*>)([\s\S]*?)(<voice[^>]*>|<\/speak>)/gi, (match, p1, middle, p3) => {
         if (/<break/i.test(middle)) {
             const wrappedMiddle = middle.replace(/(<break[^>]*\/>)/gi, `\n  <voice name="${defaultVoice}">$1</voice>\n`);
