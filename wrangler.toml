@@ -2,9 +2,15 @@ name = "tts1"
 main = "worker.js"
 compatibility_date = "2024-09-01"
 
-# 开启 Cloudflare Workers 原生大语言模型绑定 (完全免费额度，无需 API Key)
+# 开启 Cloudflare Workers 原生 AI 绑定（免费调用 DeepSeek 模型）
 [ai]
 binding = "AI"
 
+# 开启性能监控与日志输出
 [observability]
 enabled = true
+
+# 可选：如果已在控制台创建 KV，可取消下两行注释绑定全球机房防击穿缓存
+# [[kv_namespaces]]
+# binding = "TTS_KV"
+# id = "你的KV_ID"
