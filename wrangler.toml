@@ -11,6 +11,6 @@ binding = "AI"
 enabled = true
 
 # 可选：如果已在控制台创建 KV，可取消下两行注释绑定全球机房防击穿缓存
-# [[kv_namespaces]]
-# binding = "TTS_KV"
-# id = "你的KV_ID"
+ [[kv_namespaces]]
+ binding = "TTS_KV"
+ id = "eab25a9fbba546edb461b90ca979406e"
