@@ -1,9 +1,10 @@
 /**
  * Cloudflare Worker: 广东高考英语听说考试 (COT) 命题与 Edge TTS 一体化网关
- * 支持引擎：
- * 1. 智谱清言 GLM 系列 (glm-4-plus / glm-4-air / glm-4-flash)
- * 2. Groq 极速云 (LPU)
- * 3. Cloudflare Workers AI 原生 (DeepSeek-R1-32B)
+ * 特性：
+ * 1. 后端安全读取 Cloudflare 环境变量机密 (GROQ_API_KEY, ZHIPU_API_KEY)
+ * 2. 深度净化 SSML 裸露 break 与注释，杜绝 Edge TTS HTTP 400
+ * 3. 支持智谱清言 (GLM 系列)、Groq (120B/27B/20B) 与 CF 原生 DeepSeek
+ * 4. 广东高考听说考试严格信息链闭环命题与答案折叠
  */
 
 const TOKEN_REFRESH_BEFORE_EXPIRY = 3 * 60;
@@ -232,14 +233,9 @@ const HTML_PAGE = `
             color: var(--text-primary); font-family: inherit; resize: vertical;
         }
         .form-textarea.ssml-editor { font-family: "JetBrains Mono", Consolas, monospace; font-size: 0.86rem; min-height: 220px; }
-        .form-textarea:focus, .form-select:focus, .form-input:focus {
+        .form-textarea:focus, .form-select:focus {
             outline: none; background: rgba(255, 255, 255, 0.45); border-color: var(--border-focus);
             box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
-        }
-
-        .form-input {
-            width: 100%; padding: 9px 12px; border: 1.5px solid var(--border); border-radius: var(--radius-md);
-            font-size: 0.88rem; font-weight: 600; color: var(--text-primary); background: var(--surface-sub);
         }
 
         .controls-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 18px; }
@@ -431,7 +427,7 @@ const HTML_PAGE = `
                                 <span>✨</span> 开启广东高考听说 AI 智能命题
                             </div>
                             <div class="ai-exam-desc">
-                                严格依循广东 COT 规范输出三问五答与故事复述，支持自选推理渠道与自定义 Prompt。
+                                严格依循广东 COT 规范输出三问五答与故事复述，API Key 已由 Cloudflare 边缘安全托管。
                             </div>
                         </div>
                         <input type="checkbox" id="aiExamToggle" style="width: 20px; height: 20px; accent-color: var(--primary); cursor: pointer;" checked>
@@ -448,7 +444,6 @@ const HTML_PAGE = `
                                 </select>
                             </div>
 
-                            <!-- 智谱清言模型下拉 -->
                             <div id="zhipuModelWrap">
                                 <label class="form-label" style="font-size:0.80rem; margin-bottom:4px;">智谱清言模型 (由强到轻)</label>
                                 <select class="form-select" id="zhipuModelSelect">
@@ -458,7 +453,6 @@ const HTML_PAGE = `
                                 </select>
                             </div>
 
-                            <!-- Groq 模型下拉 -->
                             <div id="groqModelWrap" style="display: none;">
                                 <label class="form-label" style="font-size:0.80rem; margin-bottom:4px;">Groq 命题模型</label>
                                 <select class="form-select" id="groqModelSelect">
@@ -467,22 +461,6 @@ const HTML_PAGE = `
                                     <option value="openai/gpt-oss-20b">openai/gpt-oss-20b (20B 极速轻量)</option>
                                 </select>
                             </div>
-                        </div>
-
-                        <!-- 智谱清言 API Key -->
-                        <div id="zhipuKeyWrap">
-                            <label class="form-label" style="font-size:0.80rem; margin-bottom:4px;">
-                                智谱清言 API Key (仅保存在本地浏览器，不通过代码库)
-                            </label>
-                            <input type="password" class="form-input" id="zhipuApiKeyInput" placeholder="输入在 open.bigmodel.cn 获取的 API Key...">
-                        </div>
-
-                        <!-- Groq API Key -->
-                        <div id="groqKeyWrap" style="display: none;">
-                            <label class="form-label" style="font-size:0.80rem; margin-bottom:4px;">
-                                Groq API Key (仅保存在本地浏览器，不通过代码库)
-                            </label>
-                            <input type="password" class="form-input" id="groqApiKeyInput" placeholder="输入在 console.groq.com 获取的 gsk_ 开头密钥...">
                         </div>
 
                         <div>
@@ -561,19 +539,6 @@ const HTML_PAGE = `
         const DEFAULT_SYSTEM_PROMPT = ${JSON.stringify(DEFAULT_COT_SYSTEM_PROMPT)};
         document.getElementById('customPromptInput').value = DEFAULT_SYSTEM_PROMPT;
 
-        // 本地读写 Groq 与 智谱 API Keys
-        const groqApiKeyInput = document.getElementById('groqApiKeyInput');
-        groqApiKeyInput.value = localStorage.getItem('user_groq_key') || '';
-        groqApiKeyInput.oninput = function() {
-            localStorage.setItem('user_groq_key', this.value.trim());
-        };
-
-        const zhipuApiKeyInput = document.getElementById('zhipuApiKeyInput');
-        zhipuApiKeyInput.value = localStorage.getItem('user_zhipu_key') || '';
-        zhipuApiKeyInput.oninput = function() {
-            localStorage.setItem('user_zhipu_key', this.value.trim());
-        };
-
         const DEFAULT_EXAM_SSML = \`<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">
   <!-- 播报 Part B + 2秒停顿 -->
   <voice name="en-US-GuyNeural">
@@ -629,7 +594,6 @@ const HTML_PAGE = `
 
         document.getElementById('ssmlInput').value = DEFAULT_EXAM_SSML;
 
-        // 壁纸与主题
         const bg = document.getElementById('bgOverlay');
         if (bg) bg.style.backgroundImage = "url('/api/wallpaper?t=" + Date.now() + "')";
 
@@ -694,19 +658,14 @@ const HTML_PAGE = `
         speedInput.oninput = function() { document.getElementById('speedVal').textContent = parseFloat(speedInput.value).toFixed(2) + 'x'; };
         pitchInput.oninput = function() { document.getElementById('pitchVal').textContent = (pitchInput.value >= 0 ? '+' : '') + pitchInput.value + 'Hz'; };
 
-        // 切换计算引擎联动
         const aiProviderSelect = document.getElementById('aiProviderSelect');
         const zhipuModelWrap = document.getElementById('zhipuModelWrap');
         const groqModelWrap = document.getElementById('groqModelWrap');
-        const zhipuKeyWrap = document.getElementById('zhipuKeyWrap');
-        const groqKeyWrap = document.getElementById('groqKeyWrap');
 
         aiProviderSelect.onchange = function() {
             const provider = this.value;
             zhipuModelWrap.style.display = provider === 'zhipu' ? 'block' : 'none';
-            zhipuKeyWrap.style.display = provider === 'zhipu' ? 'block' : 'none';
             groqModelWrap.style.display = provider === 'groq' ? 'block' : 'none';
-            groqKeyWrap.style.display = provider === 'groq' ? 'block' : 'none';
         };
 
         const togglePromptBtn = document.getElementById('togglePromptBtn');
@@ -815,15 +774,11 @@ const HTML_PAGE = `
             let examTask = Promise.resolve();
             if (enableExam) {
                 const provider = aiProviderSelect.value;
-                let model = 'openai/gpt-oss-120b';
-                let clientApiKey = '';
-
+                let model = 'glm-4-plus';
                 if (provider === 'zhipu') {
                     model = document.getElementById('zhipuModelSelect').value;
-                    clientApiKey = zhipuApiKeyInput.value.trim();
                 } else if (provider === 'groq') {
                     model = document.getElementById('groqModelSelect').value;
-                    clientApiKey = groqApiKeyInput.value.trim();
                 }
 
                 const customPrompt = document.getElementById('customPromptInput').value.trim();
@@ -835,7 +790,6 @@ const HTML_PAGE = `
                         text: text,
                         provider: provider,
                         model: model,
-                        apiKey: clientApiKey,
                         systemPrompt: customPrompt
                     })
                 }).then(async res => {
@@ -907,10 +861,10 @@ async function handleRequest(request, env, ctx) {
         }
     }
 
-    // ==================== 多渠道 (智谱清言 GLM / Groq / CF DeepSeek) 听说试题生成 ====================
+    // ==================== 统一多渠道 AI 命题网关 ====================
     if (path === "/api/generate-exam") {
         try {
-            const { text, provider = "zhipu", model = "glm-4-plus", apiKey, systemPrompt } = await request.json();
+            const { text, provider = "zhipu", model = "glm-4-plus", systemPrompt } = await request.json();
             if (!text || !text.trim()) {
                 return new Response(JSON.stringify({ error: "文本内容不能为空" }), {
                     status: 400,
@@ -922,17 +876,16 @@ async function handleRequest(request, env, ctx) {
             let rawOutput = "";
 
             if (provider === "zhipu") {
-                const zhipuApiKey = apiKey || env.ZHIPU_API_KEY;
+                const zhipuApiKey = env.ZHIPU_API_KEY;
                 if (!zhipuApiKey) {
                     return new Response(JSON.stringify({
-                        error: "未提供智谱清言 API Key。请在前端面板中输入您的有效 Key"
+                        error: "未在 Cloudflare 后台配置 ZHIPU_API_KEY。请前往 Worker 设置 -> 变量和机密 中添加。"
                     }), {
                         status: 400,
                         headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
                     });
                 }
 
-                // 对接智谱开放平台 v4 标准接口
                 const zhipuRes = await fetch("https://open.bigmodel.cn/api/paas/v4/chat/completions", {
                     method: "POST",
                     headers: {
@@ -959,10 +912,10 @@ async function handleRequest(request, env, ctx) {
                 rawOutput = (zhipuData.choices?.[0]?.message?.content || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 
             } else if (provider === "groq") {
-                const groqApiKey = apiKey || env.GROQ_API_KEY;
+                const groqApiKey = env.GROQ_API_KEY;
                 if (!groqApiKey) {
                     return new Response(JSON.stringify({
-                        error: "未提供 Groq API Key。请在前端配置面板中输入您的有效 Key"
+                        error: "未在 Cloudflare 后台配置 GROQ_API_KEY。请前往 Worker 设置 -> 变量和机密 中添加。"
                     }), {
                         status: 400,
                         headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
@@ -995,7 +948,6 @@ async function handleRequest(request, env, ctx) {
                 rawOutput = (groqData.choices?.[0]?.message?.content || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 
             } else {
-                // Cloudflare Workers AI 原生推理 (DeepSeek-R1-32B)
                 if (!env.AI) {
                     return new Response(JSON.stringify({
                         error: "未在 wrangler.toml 中绑定 Workers AI。请配置 [ai] binding = 'AI' 或切换为 智谱/Groq 引擎"
@@ -1147,6 +1099,7 @@ async function getVoice(text, voiceName, rate, pitch, volume, style, outputForma
     });
 }
 
+// 健壮级 SSML 语法容错：剔除所有注释，并安全包裹裸露在外面的 break 标签
 function sanitizeSsml(ssmlText, defaultVoice = "en-US-GuyNeural") {
     if (!ssmlText || !ssmlText.trim().startsWith('<speak')) return ssmlText;
 
