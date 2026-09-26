@@ -1,10 +1,6 @@
 /**
  * Cloudflare Worker: 广东高考英语听说考试 (COT) 命题与 Edge TTS 一体化网关
- * 特性：
- * 1. 后端安全读取 Cloudflare 环境变量机密 (GROQ_API_KEY, ZHIPU_API_KEY)
- * 2. 深度净化 SSML 裸露 break 与注释，杜绝 Edge TTS HTTP 400
- * 3. 支持智谱清言 (GLM 系列)、Groq (120B/27B/20B) 与 CF 原生 DeepSeek
- * 4. 广东高考听说考试严格信息链闭环命题与答案折叠
+ * 增强：适配 Groq 免费层 1000 OTPM 限额控制，修复 SSML 容错与浏览器端 Key 存储
  */
 
 const TOKEN_REFRESH_BEFORE_EXPIRY = 3 * 60;
@@ -44,7 +40,7 @@ const DEFAULT_COT_SYSTEM_PROMPT = `你是一名精通广东省普通高考英语
 1. Part B 角色扮演材料（双人交替日常对话）
 2. Part C 故事复述材料（单人独白记叙文）
 
-请严格执行【广东省高考英语听说考试】命题规范与信息依赖链条进行命题，保持语言精炼，杜绝多余开场白：
+请严格执行【广东省高考英语听说考试】命题规范与信息依赖链条进行命题，保持语言精炼，杜绝空行多余废话：
 
 【命题核心铁律】：
 1. Part B 角色扮演：
@@ -233,9 +229,14 @@ const HTML_PAGE = `
             color: var(--text-primary); font-family: inherit; resize: vertical;
         }
         .form-textarea.ssml-editor { font-family: "JetBrains Mono", Consolas, monospace; font-size: 0.86rem; min-height: 220px; }
-        .form-textarea:focus, .form-select:focus {
+        .form-textarea:focus, .form-select:focus, .form-input:focus {
             outline: none; background: rgba(255, 255, 255, 0.45); border-color: var(--border-focus);
             box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
+        }
+
+        .form-input {
+            width: 100%; padding: 9px 12px; border: 1.5px solid var(--border); border-radius: var(--radius-md);
+            font-size: 0.88rem; font-weight: 600; color: var(--text-primary); background: var(--surface-sub);
         }
 
         .controls-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 18px; }
@@ -247,7 +248,6 @@ const HTML_PAGE = `
         .slider-val { font-size: 0.82rem; color: var(--primary); font-weight: 700; }
         .form-range { width: 100%; accent-color: var(--primary); cursor: pointer; }
 
-        /* AI 命题配置面板 */
         .ai-exam-box {
             background: rgba(37, 99, 235, 0.08); border: 1.5px solid rgba(37, 99, 235, 0.3);
             border-radius: var(--radius-lg); padding: 14px 16px; margin-bottom: 18px;
@@ -267,42 +267,6 @@ const HTML_PAGE = `
         .ai-grid-row {
             display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;
         }
-
-        .api-config-box {
-            margin-top: 14px; padding: 14px 16px;
-            background: rgba(16, 185, 129, 0.07);
-            border: 1.5px solid rgba(16, 185, 129, 0.28);
-            border-radius: var(--radius-lg);
-        }
-        .api-config-header {
-            display: flex; align-items: center; justify-content: space-between;
-            gap: 12px; cursor: pointer;
-        }
-        .api-config-title { font-weight: 700; font-size: 0.88rem; }
-        .api-config-desc { font-size: 0.74rem; color: var(--text-secondary); margin-top: 3px; }
-        .api-config-panel {
-            display: none; margin-top: 12px; padding-top: 12px;
-            border-top: 1px dashed rgba(16, 185, 129, 0.28);
-        }
-        .api-config-panel.open { display: block; }
-        .secret-input {
-            width: 100%; padding: 10px 12px; border: 1.5px solid var(--border);
-            border-radius: var(--radius-md); background: var(--surface-sub);
-            color: var(--text-primary); font-family: monospace; font-size: 0.84rem;
-        }
-        .secret-input:focus {
-            outline: none; border-color: #10b981;
-            box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.14);
-        }
-        .api-config-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
-        .btn-config {
-            border: 1px solid var(--border); background: var(--surface);
-            color: var(--text-primary); padding: 8px 12px; border-radius: var(--radius-md);
-            cursor: pointer; font-weight: 700; font-size: 0.80rem;
-        }
-        .btn-config.primary { background: #10b981; border-color: #10b981; color: #fff; }
-        .api-config-note { margin-top: 8px; font-size: 0.72rem; color: var(--text-secondary); line-height: 1.55; }
-        .api-config-status { margin-top: 8px; font-size: 0.76rem; font-weight: 700; }
 
         .prompt-accordion-btn {
             background: transparent; border: none; color: var(--primary);
@@ -463,43 +427,7 @@ const HTML_PAGE = `
                                 <span>✨</span> 开启广东高考听说 AI 智能命题
                             </div>
                             <div class="ai-exam-desc">
-                                严格依循广东 COT 规范输出三问五答与故事复述，API Key 已由 Cloudflare 边缘安全托管。
-                            </div>
-                            <div id="aiKeyStatus" style="font-size:0.72rem; margin-top:5px; color:var(--text-secondary);">正在检测 Worker 密钥绑定状态...</div>
-
-                            <div class="api-config-box">
-                                <div class="api-config-header" id="apiConfigHeader">
-                                    <div>
-                                        <div class="api-config-title">🔐 API 管理员配置</div>
-                                        <div class="api-config-desc">管理员可在此输入 API Key；保存后 Key 只留在 Worker 后端，普通访客无法读取。</div>
-                                    </div>
-                                    <span id="apiConfigArrow">▼</span>
-                                </div>
-                                <div class="api-config-panel" id="apiConfigPanel">
-                                    <div class="form-group" style="margin-bottom:10px;">
-                                        <label class="form-label" style="font-size:0.80rem;">管理员配置密码</label>
-                                        <input class="secret-input" id="aiConfigPassword" type="password" autocomplete="off" placeholder="输入 Cloudflare Secret: AI_CONFIG_PASSWORD">
-                                    </div>
-                                    <div class="ai-grid-row">
-                                        <div>
-                                            <label class="form-label" style="font-size:0.80rem;">智谱 API Key</label>
-                                            <input class="secret-input" id="zhipuApiInput" type="password" autocomplete="off" placeholder="输入后保存，不会回显">
-                                        </div>
-                                        <div>
-                                            <label class="form-label" style="font-size:0.80rem;">Groq API Key</label>
-                                            <input class="secret-input" id="groqApiInput" type="password" autocomplete="off" placeholder="输入后保存，不会回显">
-                                        </div>
-                                    </div>
-                                    <div class="api-config-actions">
-                                        <button type="button" class="btn-config primary" id="saveApiConfigBtn">保存到 Worker</button>
-                                        <button type="button" class="btn-config" id="clearApiConfigBtn">清除网页输入</button>
-                                    </div>
-                                    <div class="api-config-note">
-                                        API Key 不会写入网页源码，也不会返回给访客。需要 Cloudflare KV 绑定 <b>AI_CONFIG_KV</b> 保存配置。
-                                        任何访客都可以使用已配置的 API 额度，因此请只给可信用户开放公网地址。
-                                    </div>
-                                    <div class="api-config-status" id="apiConfigStatus"></div>
-                                </div>
+                                严格依循广东 COT 规范输出三问五答与故事复述，支持自选推理渠道与自定义 Prompt。
                             </div>
                         </div>
                         <input type="checkbox" id="aiExamToggle" style="width: 20px; height: 20px; accent-color: var(--primary); cursor: pointer;" checked>
@@ -510,29 +438,26 @@ const HTML_PAGE = `
                             <div>
                                 <label class="form-label" style="font-size:0.80rem; margin-bottom:4px;">推理计算引擎</label>
                                 <select class="form-select" id="aiProviderSelect">
-                                    <option value="zhipu" selected>智谱清言 (GLM 系列大模型)</option>
-                                    <option value="groq">Groq 极速云 (LPU 毫秒级加速)</option>
+                                    <option value="groq" selected>Groq 极速云 (LPU 毫秒级加速)</option>
                                     <option value="cf">Cloudflare 自带 (DeepSeek-R1-32B)</option>
                                 </select>
                             </div>
-
-                            <div id="zhipuModelWrap">
-                                <label class="form-label" style="font-size:0.80rem; margin-bottom:4px;">智谱清言模型 (由强到轻)</label>
-                                <select class="form-select" id="zhipuModelSelect">
-                                    <option value="glm-4-plus" selected>glm-4-plus (旗舰大模型 · 推理最强)</option>
-                                    <option value="glm-4-air">glm-4-air (高性价比 · 均衡优选)</option>
-                                    <option value="glm-4-flash">glm-4-flash (极速免费 · 秒级响应)</option>
-                                </select>
-                            </div>
-
-                            <div id="groqModelWrap" style="display: none;">
+                            <div id="groqModelWrap">
                                 <label class="form-label" style="font-size:0.80rem; margin-bottom:4px;">Groq 命题模型</label>
                                 <select class="form-select" id="groqModelSelect">
-                                    <option value="openai/gpt-oss-120b" selected>openai/gpt-oss-120b (120B 旗舰 · 推荐)</option>
+                                    <option value="openai/gpt-oss-120b" selected>openai/gpt-oss-120b (120B 旗舰 · 额度充裕推荐)</option>
                                     <option value="qwen/qwen3.8-27b">qwen/qwen3.8-27b (27B 通义全能)</option>
-                                    <option value="openai/gpt-oss-20b">openai/gpt-oss-20b (20B 极速轻量)</option>
+                                    <option value="openai/gpt-oss-20b">openai/gpt-oss-20b (20B 极速推理轻量)</option>
                                 </select>
                             </div>
+                        </div>
+
+                        <!-- 浏览器本地存储 Groq Key -->
+                        <div id="groqKeyWrap">
+                            <label class="form-label" style="font-size:0.80rem; margin-bottom:4px;">
+                                Groq API Key (仅保存在本地浏览器，不通过代码库)
+                            </label>
+                            <input type="password" class="form-input" id="groqApiKeyInput" placeholder="输入在 console.groq.com 获取的 gsk_ 开头密钥...">
                         </div>
 
                         <div>
@@ -611,6 +536,12 @@ const HTML_PAGE = `
         const DEFAULT_SYSTEM_PROMPT = ${JSON.stringify(DEFAULT_COT_SYSTEM_PROMPT)};
         document.getElementById('customPromptInput').value = DEFAULT_SYSTEM_PROMPT;
 
+        const groqApiKeyInput = document.getElementById('groqApiKeyInput');
+        groqApiKeyInput.value = localStorage.getItem('user_groq_key') || '';
+        groqApiKeyInput.oninput = function() {
+            localStorage.setItem('user_groq_key', this.value.trim());
+        };
+
         const DEFAULT_EXAM_SSML = \`<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">
   <!-- 播报 Part B + 2秒停顿 -->
   <voice name="en-US-GuyNeural">
@@ -683,24 +614,6 @@ const HTML_PAGE = `
         };
         applyTheme(localStorage.getItem('tts_theme') || 'light');
 
-        // 只检查 Worker 是否收到了 Secret，不会把密钥返回到浏览器。
-        async function refreshAiKeyStatus() {
-            const el = document.getElementById('aiKeyStatus');
-            try {
-                const res = await fetch('/api/ai-status', { cache: 'no-store' });
-                const data = await res.json();
-                if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
-                const z = data.zhipu ? '智谱 ✓' : '智谱 ✗';
-                const g = data.groq ? 'Groq ✓' : 'Groq ✗';
-                el.textContent = 'Worker 密钥绑定：' + z + ' · ' + g + '（仅检测是否存在，不显示密钥）';
-                el.style.color = (data.zhipu || data.groq) ? '#059669' : '#dc2626';
-            } catch (e) {
-                el.textContent = '密钥状态检测失败：' + e.message;
-                el.style.color = '#dc2626';
-            }
-        }
-        refreshAiKeyStatus();
-
         function pad(n) { return n < 10 ? '0' + n : n; }
         function updateCountdowns() {
             const now = new Date();
@@ -749,13 +662,12 @@ const HTML_PAGE = `
         pitchInput.oninput = function() { document.getElementById('pitchVal').textContent = (pitchInput.value >= 0 ? '+' : '') + pitchInput.value + 'Hz'; };
 
         const aiProviderSelect = document.getElementById('aiProviderSelect');
-        const zhipuModelWrap = document.getElementById('zhipuModelWrap');
         const groqModelWrap = document.getElementById('groqModelWrap');
-
+        const groqKeyWrap = document.getElementById('groqKeyWrap');
         aiProviderSelect.onchange = function() {
-            const provider = this.value;
-            zhipuModelWrap.style.display = provider === 'zhipu' ? 'block' : 'none';
-            groqModelWrap.style.display = provider === 'groq' ? 'block' : 'none';
+            const isGroq = this.value === 'groq';
+            groqModelWrap.style.display = isGroq ? 'block' : 'none';
+            groqKeyWrap.style.display = isGroq ? 'block' : 'none';
         };
 
         const togglePromptBtn = document.getElementById('togglePromptBtn');
@@ -790,92 +702,6 @@ const HTML_PAGE = `
             answerCollapseBox.style.display = isHidden ? 'block' : 'none';
             answerToggleIcon.textContent = isHidden ? '▲ 点击收起' : '▼ 点击展开';
         };
-
-
-        // ==================== Worker API Key 管理 ====================
-        const apiConfigHeader = document.getElementById('apiConfigHeader');
-        const apiConfigPanel = document.getElementById('apiConfigPanel');
-        const apiConfigArrow = document.getElementById('apiConfigArrow');
-        const apiConfigStatus = document.getElementById('apiConfigStatus');
-
-        apiConfigHeader.onclick = function() {
-            apiConfigPanel.classList.toggle('open');
-            apiConfigArrow.textContent = apiConfigPanel.classList.contains('open') ? '▲' : '▼';
-        };
-
-        document.getElementById('clearApiConfigBtn').onclick = function() {
-            document.getElementById('zhipuApiInput').value = '';
-            document.getElementById('groqApiInput').value = '';
-            document.getElementById('aiConfigPassword').value = '';
-            apiConfigStatus.textContent = '已清除本页面输入。';
-            apiConfigStatus.style.color = 'var(--text-secondary)';
-        };
-
-        document.getElementById('saveApiConfigBtn').onclick = async function() {
-            const password = document.getElementById('aiConfigPassword').value.trim();
-            const zhipuKey = document.getElementById('zhipuApiInput').value.trim();
-            const groqKey = document.getElementById('groqApiInput').value.trim();
-
-            if (!password) {
-                apiConfigStatus.textContent = '请输入管理员配置密码。';
-                apiConfigStatus.style.color = '#dc2626';
-                return;
-            }
-            if (!zhipuKey && !groqKey) {
-                apiConfigStatus.textContent = '至少输入一个 API Key。';
-                apiConfigStatus.style.color = '#dc2626';
-                return;
-            }
-
-            const btn = document.getElementById('saveApiConfigBtn');
-            btn.disabled = true;
-            btn.textContent = '保存中...';
-            apiConfigStatus.textContent = '';
-
-            try {
-                const res = await fetch('/api/configure-ai', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        password,
-                        zhipuApiKey: zhipuKey || undefined,
-                        groqApiKey: groqKey || undefined
-                    })
-                });
-                const data = await res.json().catch(() => ({}));
-                if (!res.ok || data.error) {
-                    throw new Error(data.error || ('保存失败 HTTP ' + res.status));
-                }
-
-                document.getElementById('zhipuApiInput').value = '';
-                document.getElementById('groqApiInput').value = '';
-                document.getElementById('aiConfigPassword').value = '';
-                apiConfigStatus.textContent = '✓ 已保存。API Key 已留在 Worker 后端，页面不会回显。';
-                apiConfigStatus.style.color = '#059669';
-                if (typeof refreshAiStatus === 'function') refreshAiStatus();
-            } catch (err) {
-                apiConfigStatus.textContent = '保存失败：' + err.message;
-                apiConfigStatus.style.color = '#dc2626';
-            } finally {
-                btn.disabled = false;
-                btn.textContent = '保存到 Worker';
-            }
-        };
-
-        async function refreshAiStatus() {
-            try {
-                const res = await fetch('/api/ai-status', { cache: 'no-store' });
-                const data = await res.json();
-                const parts = [];
-                parts.push(data.zhipu ? '智谱 ✓' : '智谱 ✗');
-                parts.push(data.groq ? 'Groq ✓' : 'Groq ✗');
-                if (data.cf) parts.push('CF AI ✓');
-                document.getElementById('aiKeyStatus').textContent = 'Worker API 状态：' + parts.join(' · ');
-            } catch {
-                document.getElementById('aiKeyStatus').textContent = 'Worker API 状态检测失败';
-            }
-        }
-        refreshAiStatus();
 
         document.getElementById('ttsForm').onsubmit = async function(e) {
             e.preventDefault();
@@ -950,14 +776,9 @@ const HTML_PAGE = `
             let examTask = Promise.resolve();
             if (enableExam) {
                 const provider = aiProviderSelect.value;
-                let model = 'glm-4-plus';
-                if (provider === 'zhipu') {
-                    model = document.getElementById('zhipuModelSelect').value;
-                } else if (provider === 'groq') {
-                    model = document.getElementById('groqModelSelect').value;
-                }
-
+                const model = document.getElementById('groqModelSelect').value;
                 const customPrompt = document.getElementById('customPromptInput').value.trim();
+                const clientApiKey = groqApiKeyInput.value.trim();
 
                 examTask = fetch('/api/generate-exam', {
                     method: 'POST',
@@ -966,6 +787,7 @@ const HTML_PAGE = `
                         text: text,
                         provider: provider,
                         model: model,
+                        apiKey: clientApiKey,
                         systemPrompt: customPrompt
                     })
                 }).then(async res => {
@@ -980,9 +802,7 @@ const HTML_PAGE = `
                             answerBody.textContent = data.answer;
                             answerContainer.style.display = 'block';
                         }
-                        if (provider === 'zhipu') examBadge.textContent = '智谱: ' + model;
-                        else if (provider === 'groq') examBadge.textContent = 'Groq: ' + model.split('/')[1];
-                        else examBadge.textContent = 'CF: DeepSeek';
+                        examBadge.textContent = provider === 'groq' ? ('Groq: ' + model.split('/')[1]) : 'CF: DeepSeek';
                     }
                 }).catch(err => {
                     examLoading.style.display = 'none';
@@ -1037,134 +857,63 @@ async function handleRequest(request, env, ctx) {
         }
     }
 
-    // ==================== 统一多渠道 AI 命题网关 ====================
-    // 仅检测 Secret 是否绑定；绝不返回 Secret 内容。
-    if (path === "/api/ai-status" && request.method === "GET") {
-        return jsonResponse({
-            ok: true,
-            zhipu: Boolean(getSecret(env, ["ZHIPU_API_KEY", "ZHIPUAI_API_KEY"])),
-            groq: Boolean(getSecret(env, ["GROQ_API_KEY", "GROQ_API_TOKEN"]))
-        }, 200, { "Cache-Control": "no-store" });
-    }
-
-    // ==================== AI Key 状态（只返回是否存在，绝不返回 Key） ====================
-    if (path === "/api/ai-status") {
-        if (request.method !== "GET") return jsonResponse({ error: "仅支持 GET 请求" }, 405);
-        const configured = await getStoredAIConfig(env);
-        return jsonResponse({
-            zhipu: !!configured.zhipuApiKey,
-            groq: !!configured.groqApiKey,
-            cf: !!env.AI
-        });
-    }
-
-    // ==================== 管理员从主页保存 AI Key ====================
-    if (path === "/api/configure-ai") {
-        if (request.method !== "POST") return jsonResponse({ error: "仅支持 POST 请求" }, 405);
-
-const adminPassword = "@Black2957";
-        if (!adminPassword) {
-            return jsonResponse({
-                error: "Worker 尚未配置 AI_CONFIG_PASSWORD。请先在 Cloudflare → Variables and Secrets 添加这个 Secret 并重新 Deploy。"
-            }, 503);
-        }
-
-        if (!env.AI_CONFIG_KV) {
-            return jsonResponse({
-                error: "Worker 尚未绑定 AI_CONFIG_KV。请创建 Cloudflare KV Namespace，并把 Binding 名称设置为 AI_CONFIG_KV，然后重新 Deploy。"
-            }, 503);
-        }
-
-        const body = await request.json().catch(() => ({}));
-        const password = typeof body.password === "string" ? body.password.trim() : "";
-        const zhipuApiKey = typeof body.zhipuApiKey === "string" ? body.zhipuApiKey.trim() : "";
-        const groqApiKey = typeof body.groqApiKey === "string" ? body.groqApiKey.trim() : "";
-
-        if (!password || password !== adminPassword) {
-            return jsonResponse({ error: "管理员配置密码错误。" }, 403);
-        }
-
-        if (!zhipuApiKey && !groqApiKey) {
-            return jsonResponse({ error: "至少提供一个 API Key。" }, 400);
-        }
-
-        const oldConfig = await getStoredAIConfig(env);
-        const newConfig = {
-            zhipuApiKey: zhipuApiKey || oldConfig.zhipuApiKey || "",
-            groqApiKey: groqApiKey || oldConfig.groqApiKey || ""
-        };
-
-        await env.AI_CONFIG_KV.put("shared_ai_keys", JSON.stringify(newConfig));
-        return jsonResponse({ ok: true });
-    }
-
     if (path === "/api/generate-exam") {
         try {
-            if (request.method !== "POST") {
-                return jsonResponse({ error: "仅支持 POST 请求" }, 405);
+            const { text, provider = "groq", model = "openai/gpt-oss-120b", apiKey, systemPrompt } = await request.json();
+            if (!text || !text.trim()) {
+                return new Response(JSON.stringify({ error: "文本内容不能为空" }), {
+                    status: 400,
+                    headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
+                });
             }
 
-            const body = await request.json().catch(() => ({}));
-            const text = typeof body.text === "string" ? body.text.trim() : "";
-            const provider = normalizeProvider(body.provider);
-            const model = typeof body.model === "string" ? body.model.trim() : "";
-            const systemPrompt = typeof body.systemPrompt === "string" ? body.systemPrompt.trim() : "";
-
-            if (!text) return jsonResponse({ error: "文本内容不能为空" }, 400);
-            if (text.length > 30000) return jsonResponse({ error: "输入材料过长，请控制在 30000 字符以内" }, 413);
-
-            const finalPrompt = systemPrompt || DEFAULT_COT_SYSTEM_PROMPT;
+            const finalPrompt = (systemPrompt && systemPrompt.trim()) ? systemPrompt.trim() : DEFAULT_COT_SYSTEM_PROMPT;
             let rawOutput = "";
 
-            if (provider === "zhipu") {
-                const storedAIConfig = await getStoredAIConfig(env);
-                const apiKey = storedAIConfig.zhipuApiKey || getSecret(env, ["ZHIPU_API_KEY", "ZHIPUAI_API_KEY"]);
-                if (!apiKey) {
-                    return jsonResponse({
-                        error: "Worker 没有读取到智谱密钥。请在 Cloudflare → Worker → Settings → Variables and Secrets 中添加 Secret：ZHIPU_API_KEY，然后重新 Deploy。"
-                    }, 400);
+            if (provider === "groq") {
+                const groqApiKey = apiKey || env.GROQ_API_KEY;
+                if (!groqApiKey) {
+                    return new Response(JSON.stringify({
+                        error: "未提供 Groq API Key。请在前端配置面板中输入您的有效 Key"
+                    }), {
+                        status: 400,
+                        headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
+                    });
                 }
 
-                // 保留原文件的 GLM 选择，同时在用户没有传模型时给出稳定默认值。
-                const zhipuModel = model || "glm-4-plus";
-                rawOutput = await callOpenAICompatibleAPI({
-                    providerName: "智谱",
-                    url: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-                    apiKey,
-                    model: zhipuModel,
-                    systemPrompt: finalPrompt,
-                    userText: text,
-                    temperature: 0.35,
-                    maxTokens: 2800
+                // 核心修复：将 max_tokens 严格限制在 950，杜绝超过 Groq 免费层的 1000 OTPM 阈值
+                const groqRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+                    method: "POST",
+                    headers: {
+                        "Authorization": `Bearer ${groqApiKey}`,
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        model: model,
+                        messages: [
+                            { role: "system", content: finalPrompt },
+                            { role: "user", content: `请根据以下考试材料，严格遵循广东英语听说高考规则命题并研制标准答案：\n\n${text}` }
+                        ],
+                        temperature: 0.3,
+                        max_tokens: 950
+                    })
                 });
 
-            } else if (provider === "groq") {
-                const storedAIConfig = await getStoredAIConfig(env);
-                const apiKey = storedAIConfig.groqApiKey || getSecret(env, ["GROQ_API_KEY", "GROQ_API_TOKEN"]);
-                if (!apiKey) {
-                    return jsonResponse({
-                        error: "Worker 没有读取到 Groq 密钥。请在 Cloudflare → Worker → Settings → Variables and Secrets 中添加 Secret：GROQ_API_KEY，然后重新 Deploy。"
-                    }, 400);
+                if (!groqRes.ok) {
+                    const errDetail = await groqRes.json().catch(() => ({}));
+                    throw new Error("Groq API 拒绝: " + (errDetail.error?.message || `HTTP ${groqRes.status}`));
                 }
 
-                // 使用当前 Groq UI 中的模型值；如果请求端没传，默认使用 120B。
-                const groqModel = model || "openai/gpt-oss-120b";
-                rawOutput = await callOpenAICompatibleAPI({
-                    providerName: "Groq",
-                    url: "https://api.groq.com/openai/v1/chat/completions",
-                    apiKey,
-                    model: groqModel,
-                    systemPrompt: finalPrompt,
-                    userText: text,
-                    temperature: 0.3,
-                    maxTokens: 1800
-                });
-
+                const groqData = await groqRes.json();
+                rawOutput = (groqData.choices?.[0]?.message?.content || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
             } else {
                 if (!env.AI) {
-                    return jsonResponse({
-                        error: "未绑定 Workers AI。请改用智谱/Groq，或在 Worker 中绑定名为 AI 的 Workers AI binding。"
-                    }, 500);
+                    return new Response(JSON.stringify({
+                        error: "未在 wrangler.toml 中绑定 Workers AI。请配置 [ai] binding = 'AI' 或切换为 Groq 引擎"
+                    }), {
+                        status: 500,
+                        headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
+                    });
                 }
 
                 const aiResponse = await env.AI.run("@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", {
@@ -1176,27 +925,30 @@ const adminPassword = "@Black2957";
                     temperature: 0.35
                 });
 
-                rawOutput = cleanModelOutput(aiResponse?.response || "");
+                rawOutput = (aiResponse.response || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
             }
-
-            if (!rawOutput) throw new Error("AI 返回为空。请检查模型权限、余额/额度以及模型名称。 ");
 
             let examContent = rawOutput;
             let answerContent = "";
+
             const examMatch = rawOutput.match(/<EXAM>([\s\S]*?)<\/EXAM>/i);
             const answerMatch = rawOutput.match(/<ANSWER>([\s\S]*?)<\/ANSWER>/i);
+
             if (examMatch) examContent = examMatch[1].trim();
             if (answerMatch) answerContent = answerMatch[1].trim();
 
-            return jsonResponse({
+            return new Response(JSON.stringify({
                 exam: examContent,
-                answer: answerContent,
-                provider,
-                model: provider === "cf" ? "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b" : (model || (provider === "groq" ? "openai/gpt-oss-120b" : "glm-4-plus"))
-            }, 200);
+                answer: answerContent
+            }), {
+                headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
+            });
         } catch (error) {
             console.error("AI 命题失败:", error);
-            return jsonResponse({ error: formatApiError(error) }, error.status || 500);
+            return new Response(JSON.stringify({ error: error.message || "命题服务异常" }), {
+                status: 500,
+                headers: { "Content-Type": "application/json", ...makeCORSHeaders() }
+            });
         }
     }
 
@@ -1469,123 +1221,6 @@ async function resolveToken(env, ctx) {
     }
 
     return data;
-}
-
-function normalizeProvider(provider) {
-    const p = String(provider || "zhipu").trim().toLowerCase();
-    if (p === "zhipu" || p === "groq" || p === "cf") return p;
-    return "zhipu";
-}
-
-async function getStoredAIConfig(env) {
-    if (!env || !env.AI_CONFIG_KV) {
-        return { zhipuApiKey: "", groqApiKey: "" };
-    }
-    try {
-        const raw = await env.AI_CONFIG_KV.get("shared_ai_keys");
-        if (!raw) return { zhipuApiKey: "", groqApiKey: "" };
-        const data = JSON.parse(raw);
-        return {
-            zhipuApiKey: typeof data?.zhipuApiKey === "string" ? data.zhipuApiKey.trim() : "",
-            groqApiKey: typeof data?.groqApiKey === "string" ? data.groqApiKey.trim() : ""
-        };
-    } catch {
-        return { zhipuApiKey: "", groqApiKey: "" };
-    }
-}
-
-function getSecret(env, names) {
-    for (const name of names) {
-        const value = env && env[name];
-        if (typeof value === "string" && value.trim()) return value.trim();
-    }
-    return "";
-}
-
-function cleanModelOutput(value) {
-    return String(value || "")
-        .replace(/<think>[\s\S]*?<\/think>/gi, "")
-        .replace(/<\|begin_of_box\|>|<\|end_of_box\|>/gi, "")
-        .trim();
-}
-
-async function callOpenAICompatibleAPI({ providerName, url, apiKey, model, systemPrompt, userText, temperature, maxTokens }) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 60000);
-    try {
-        const response = await fetch(url, {
-            method: "POST",
-            headers: {
-                "Authorization": `Bearer ${apiKey}`,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                model,
-                messages: [
-                    { role: "system", content: systemPrompt },
-                    { role: "user", content: `请根据以下考试材料，严格遵循广东英语听说高考规则命题并研制标准答案：\n\n${userText}` }
-                ],
-                temperature,
-                max_tokens: maxTokens,
-                stream: false
-            }),
-            signal: controller.signal
-        });
-
-        const raw = await response.text();
-        let data = {};
-        try { data = raw ? JSON.parse(raw) : {}; } catch {}
-
-        if (!response.ok) {
-            const message = data?.error?.message || data?.message || data?.msg || raw.slice(0, 500) || `HTTP ${response.status}`;
-            const err = new Error(`${providerName} API 拒绝：${message}`);
-            err.status = response.status;
-            throw err;
-        }
-
-        const content = data?.choices?.[0]?.message?.content;
-        if (typeof content !== "string") {
-            const err = new Error(`${providerName} API 返回成功，但响应中没有 choices[0].message.content。`);
-            err.status = 502;
-            throw err;
-        }
-        return cleanModelOutput(content);
-    } catch (error) {
-        if (error?.name === "AbortError") {
-            const err = new Error(`${providerName} API 请求超时（60 秒）。请稍后重试或换一个模型。`);
-            err.status = 504;
-            throw err;
-        }
-        throw error;
-    } finally {
-        clearTimeout(timer);
-    }
-}
-
-function formatApiError(error) {
-    const message = error?.message || String(error || "未知错误");
-    if (/401|unauthorized|invalid.*key|authentication/i.test(message)) {
-        return `${message}。通常表示 Secret 名称/密钥不正确，或新增 Secret 后尚未重新 Deploy。`;
-    }
-    if (/404|model.*not found|model.*does not exist/i.test(message)) {
-        return `${message}。请检查当前选择的模型名称及该 API Key 是否有该模型权限。`;
-    }
-    if (/429|rate limit|quota|余额|额度/i.test(message)) {
-        return `${message}。通常表示请求频率、账户额度或模型配额达到限制。`;
-    }
-    return message;
-}
-
-function jsonResponse(data, status = 200, extraHeaders = {}) {
-    return new Response(JSON.stringify(data), {
-        status,
-        headers: {
-            "Content-Type": "application/json; charset=utf-8",
-            "Cache-Control": "no-store",
-            ...makeCORSHeaders(),
-            ...extraHeaders
-        }
-    });
 }
 
 function makeCORSHeaders() {
