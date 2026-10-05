@@ -2,50 +2,67 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // 路由 1：处理 TTS 请求
+    // 1. 处理 TTS 音频生成
     if (url.pathname === "/api/tts" && request.method === "POST") {
       try {
         const { text, voice = "Fola" } = await request.json();
         const apiKey = env.GEMINI_API_KEY;
 
         if (!apiKey) {
-          return new Response(JSON.stringify({ error: "环境变量 GEMINI_API_KEY 未设置" }), {
+          return new Response(JSON.stringify({ error: "未检测到 GEMINI_API_KEY，请在 Worker Settings 中配置！" }), {
             status: 500,
             headers: { "Content-Type": "application/json; charset=utf-8" },
           });
         }
 
         if (!text || !text.trim()) {
-          return new Response(JSON.stringify({ error: "文本内容不能为空" }), {
+          return new Response(JSON.stringify({ error: "输入的朗读内容不能为空" }), {
             status: 400,
             headers: { "Content-Type": "application/json; charset=utf-8" },
           });
         }
 
+        // 锁定教学提示词：标准东京语调 + 1秒自然停顿 + 中文释义清晰发音
         const stylePrompt =
           "Act as a professional language teacher. Speak with a clear, steady, and calm tone. " +
           "Pronounce Japanese words slowly with authentic standard Tokyo pitch accent, " +
           "pause naturally for 1 second, then pronounce the Chinese translation in a clear and standard Mandarin accent. " +
           "Keep a consistent educational pacing.";
 
+        // 严格匹配 Gemini 3.8 Flash TTS 官方结构
         const payload = {
           contents: [
             {
               role: "user",
-              parts: [{ text: `[Style: ${stylePrompt}]\n\n${text}` }],
-            },
+              parts: [
+                {
+                  text: `[Style: ${stylePrompt}]\n\n${text}`,
+                  speechMetadata: {
+                    speaker: "Speaker 1"
+                  }
+                }
+              ]
+            }
           ],
           generationConfig: {
             temperature: 0.3,
             responseModalities: ["audio"],
             speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: {
-                  voiceName: voice,
-                },
-              },
-            },
-          },
+              multiSpeakerVoiceConfig: {
+                mode: "VERBATIM",
+                speakerVoiceConfigs: [
+                  {
+                    speaker: "Speaker 1",
+                    voiceConfig: {
+                      prebuiltVoiceConfig: {
+                        voiceName: voice
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
         };
 
         const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash-tts:generateContent?key=${apiKey}`;
@@ -57,7 +74,7 @@ export default {
 
         if (!response.ok) {
           const errDetail = await response.text();
-          return new Response(JSON.stringify({ error: errDetail }), {
+          return new Response(JSON.stringify({ error: `Google API 报错 (${response.status}): ${errDetail}` }), {
             status: response.status,
             headers: { "Content-Type": "application/json; charset=utf-8" },
           });
@@ -68,12 +85,13 @@ export default {
         const inlineData = candidate?.content?.parts?.[0]?.inlineData;
 
         if (!inlineData?.data) {
-          return new Response(JSON.stringify({ error: "API 未返回有效的音频数据" }), {
+          return new Response(JSON.stringify({ error: "未提取到音频数据，请检查文本是否合规" }), {
             status: 500,
             headers: { "Content-Type": "application/json; charset=utf-8" },
           });
         }
 
+        // 解码 Base64 PCM 并组装 44 字节标准 WAV 头部
         const binaryStr = atob(inlineData.data);
         const pcmBytes = new Uint8Array(binaryStr.length);
         for (let i = 0; i < binaryStr.length; i++) {
@@ -91,19 +109,19 @@ export default {
         return new Response(wavBytes, {
           headers: {
             "Content-Type": "audio/wav",
-            "Content-Disposition": 'inline; filename="lesson_vocab.wav"',
+            "Content-Disposition": 'inline; filename="japanese_vocab.wav"',
             "Cache-Control": "no-cache",
           },
         });
       } catch (err) {
-        return new Response(JSON.stringify({ error: err.message }), {
+        return new Response(JSON.stringify({ error: `Worker 异常: ${err.message}` }), {
           status: 500,
           headers: { "Content-Type": "application/json; charset=utf-8" },
         });
       }
     }
 
-    // 路由 2：渲染网页
+    // 2. 渲染前端网页
     return new Response(renderHtml(), {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
@@ -149,7 +167,7 @@ function renderHtml() {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>日语单词朗读助教</title>
+  <title>日语单词跟读助教</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 16px; min-height: 100vh; display: flex; justify-content: center; }
@@ -165,7 +183,7 @@ function renderHtml() {
     textarea:focus { border-color: #38bdf8; }
     .btn-run { width: 100%; background: #0284c7; color: #ffffff; border: none; padding: 13px; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; display: flex; justify-content: center; align-items: center; gap: 8px; }
     .btn-run:disabled { opacity: 0.5; cursor: not-allowed; }
-    .audio-panel { display: none; flex-direction: column; gap: 10px; margin-top: 6px; }
+    .audio-panel { display: none; flex-direction: column; gap: 10px; margin-top: 10px; }
     audio { width: 100%; height: 42px; border-radius: 8px; }
     .actions { display: flex; gap: 10px; }
     .btn-act { flex: 1; text-align: center; text-decoration: none; padding: 10px; border-radius: 8px; font-size: 0.9rem; font-weight: 500; cursor: pointer; border: none; }
@@ -184,7 +202,7 @@ function renderHtml() {
       <div class="controls">
         <select id="voiceSelect">
           <option value="Fola" selected>声音: Fola (清晰标准女声)</option>
-          <option value="Rami">声音: Rami (温暖沉稳男声)</option>
+          <option value="Rami">声音: Rami (沉稳温和男声)</option>
         </select>
         <button class="btn-clear" onclick="clearInput()">清空</button>
       </div>
@@ -204,7 +222,7 @@ function renderHtml() {
     </div>
 
     <div class="tips">
-      已在后台固化东京重音、教学节奏与 1 秒自然缓冲停顿
+      后台已固化标准东京重音、教学语速与 1 秒间隔停顿
     </div>
   </div>
 
@@ -230,7 +248,7 @@ function renderHtml() {
       }
 
       runBtn.disabled = true;
-      runBtn.innerHTML = "正在合成，请稍候...";
+      runBtn.innerHTML = "正在合成音频，请稍候...";
 
       try {
         const res = await fetch("/api/tts", {
@@ -240,8 +258,8 @@ function renderHtml() {
         });
 
         if (!res.ok) {
-          const errData = await res.json().catch(() => ({ error: "网络请求异常" }));
-          throw new Error(errData.error || "合成失败");
+          const errData = await res.json().catch(() => ({ error: "请求失败，状态码: " + res.status }));
+          throw new Error(errData.error || "生成失败");
         }
 
         const blob = await res.blob();
@@ -256,7 +274,7 @@ function renderHtml() {
         audioPanel.style.display = "flex";
         player.play().catch(() => {});
       } catch (e) {
-        alert("合成出错: " + e.message);
+        alert("合成失败提示: " + e.message);
       } finally {
         runBtn.disabled = false;
         runBtn.innerHTML = "开始合成朗读";
