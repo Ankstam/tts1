@@ -53,7 +53,7 @@ export default {
         const finalStyle = buildFinalStyle(stylePrompt, speed);
 
         // 构造边缘缓存 Key
-        const cachePayload = `${cleanText}_${voice}_${finalStyle}`;
+        const cachePayload = `${cleanText}_${voice}_${finalStyle}_v2`;
         const hashBuf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(cachePayload));
         const hashHex = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, "0")).join("");
         const cache = caches.default;
@@ -68,7 +68,7 @@ export default {
           }
         } catch (_) {}
 
-        // 对齐官方 Python SDK 的完整结构与 Transcript 标记
+        // 官方 Transcript 与 Style 结构
         const payload = {
           contents: [
             {
@@ -147,20 +147,23 @@ export default {
           });
         }
 
-        // 解码 Base64 原始 PCM 字节流
+        // 解码 Base64 PCM 原始数据
         const binaryString = atob(inlineData.data);
         const len = binaryString.length;
-        const pcmBytes = new Uint8Array(len);
+        const rawPcmBytes = new Uint8Array(len);
         for (let i = 0; i < len; i++) {
-          pcmBytes[i] = binaryString.charCodeAt(i);
+          rawPcmBytes[i] = binaryString.charCodeAt(i);
         }
 
-        // 解析音频采样率与量化位数（严格对齐官方 parse_audio_mime_type）
+        // 解析采样率与采样位深
         const mimeType = inlineData.mimeType || "audio/L16;rate=24000";
         const { sampleRate, bitsPerSample } = parseAudioMimeType(mimeType);
 
-        // 构造标准 WAV 头部（严格对齐官方 convert_to_wav）
-        const wavBuffer = convertToWav(pcmBytes, sampleRate, bitsPerSample);
+        // 进行音频净化：对齐字节、消除尾部截断爆音并注入静音缓冲垫
+        const sanitizedPcmBytes = sanitizePcmAudio(rawPcmBytes, sampleRate);
+
+        // 构造标准 WAV 文件
+        const wavBuffer = convertToWav(sanitizedPcmBytes, sampleRate, bitsPerSample);
 
         const finalHeaders = {
           "Content-Type": "audio/wav",
@@ -198,7 +201,44 @@ export default {
   }
 };
 
-// 解析 MIME 类型参数（严格对齐官方 parse_audio_mime_type）
+// 音频平滑去噪与防爆音处理器
+function sanitizePcmAudio(pcmBytes, sampleRate) {
+  // 1. 严格对齐 16 位采样点（每点 2 字节），丢弃末尾孤立字节
+  let byteLen = pcmBytes.length;
+  if (byteLen % 2 !== 0) {
+    byteLen -= 1;
+    pcmBytes = pcmBytes.subarray(0, byteLen);
+  }
+
+  const sampleCount = byteLen / 2;
+  const samples = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, sampleCount);
+
+  // 2. 尾部平滑余弦淡出（Fade Out）：消除直流偏置与硬截断
+  const fadeSeconds = 0.06; // 60 毫秒淡出
+  const fadeSamples = Math.min(Math.floor(sampleRate * fadeSeconds), sampleCount);
+  const fadeStartIndex = sampleCount - fadeSamples;
+
+  for (let i = 0; i < fadeSamples; i++) {
+    // 余弦淡出增益平滑曲线 (1.0 -> 0.0)
+    const factor = 0.5 * (1 + Math.cos((Math.PI * i) / fadeSamples));
+    samples[fadeStartIndex + i] = Math.round(samples[fadeStartIndex + i] * factor);
+  }
+
+  // 3. 追加 300 毫秒的纯净静音缓冲垫（Silence Padding）
+  // 让扬声器在无声状态下平稳自然结束，杜绝 DAC 关断产生的刺激电平杂音
+  const silenceSeconds = 0.3; // 300ms
+  const silenceSamples = Math.floor(sampleRate * silenceSeconds);
+  const totalSampleCount = sampleCount + silenceSamples;
+
+  const paddedBuffer = new ArrayBuffer(totalSampleCount * 2);
+  const paddedSamples = new Int16Array(paddedBuffer);
+
+  // 写入已淡出的有效采样，剩余采样自动为 0（静音）
+  paddedSamples.set(samples, 0);
+
+  return new Uint8Array(paddedBuffer);
+}
+
 function parseAudioMimeType(mimeType) {
   let sampleRate = 24000;
   let bitsPerSample = 16;
@@ -221,7 +261,6 @@ function parseAudioMimeType(mimeType) {
   return { sampleRate, bitsPerSample };
 }
 
-// 构造 44 字节标准 RIFF WAV 头部（严格对齐官方 convert_to_wav）
 function convertToWav(audioData, sampleRate, bitsPerSample) {
   const numChannels = 1;
   const bytesPerSample = bitsPerSample / 8;
@@ -244,7 +283,7 @@ function convertToWav(audioData, sampleRate, bitsPerSample) {
   writeString(8, "WAVE");
   writeString(12, "fmt ");
   view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true); // PCM = 1
+  view.setUint16(20, 1, true);
   view.setUint16(22, numChannels, true);
   view.setUint32(24, sampleRate, true);
   view.setUint32(28, byteRate, true);
@@ -260,7 +299,7 @@ function convertToWav(audioData, sampleRate, bitsPerSample) {
 function buildFinalStyle(customStyle, speed) {
   let base = (customStyle || "").trim();
   if (!base) {
-    base = "Professional Japanese tutor. Speak with a calm and educational tone. Authentic standard Tokyo pitch accent, 1 second pause between words and Chinese translations.";
+    base = "Professional Japanese tutor. Speak with a calm and educational tone. Authentic standard Tokyo pitch accent, 1 second pause between words and Chinese translations. Conclude peacefully without trailing noise.";
   }
 
   if (speed === "slow") {
@@ -387,8 +426,8 @@ function buildHtml() {
           <label>发音人声 (Voice)</label>
           <select id="voiceSelect">
             <optgroup label="Tutor 教学/导师">
-              <option value="Fola" selected>Fola (清晰友善·标准女声)</option>
-              <option value="Bodi">Bodi (沉稳内敛·低音男声)</option>
+              <option value="Fola">Fola (清晰友善·标准女声)</option>
+              <option value="Bodi" selected>Bodi (沉稳内敛·低音男声)</option>
               <option value="Lumi">Lumi (亲切温和·低音女声)</option>
               <option value="Sola">Sola (轻柔放松·高音女声)</option>
               <option value="Varo">Varo (随性自然·低音男声)</option>
@@ -506,13 +545,13 @@ function buildHtml() {
     </div>
 
     <div class="footer-note">
-      已对齐 Google 官方 convert_to_wav 与 PrebuiltVoiceConfig 规范
+      内置 60ms 余弦淡出与 300ms 纯净静音缓冲，彻底消除末尾刺激性爆破杂音
     </div>
   </div>
 
   <script>
     const STYLE_PRESETS = {
-      tutor: "Professional Japanese tutor. Speak with a calm and educational tone. Authentic standard Tokyo pitch accent, 1 second pause between words and Chinese translations.",
+      tutor: "Professional Japanese tutor. Speak with a calm and educational tone. Authentic standard Tokyo pitch accent, 1 second pause between words and Chinese translations. Conclude peacefully without trailing noise.",
       friendly: "Warm and neutral delivery with friendly micro-pauses. Gentle, encouraging, and supportive tone.",
       whisper: "Whisper quietly with a delicate, breathy tone. Gentle micro-pauses.",
       narration: "Commanding, rich vocal modulation with dramatic pauses and elegant educational cadence.",
@@ -533,7 +572,7 @@ function buildHtml() {
     let timer = null;
     let latestErrorData = null;
 
-    textarea.value = TEXT_PRESETS.time;
+    textarea.value = TEXT_PRESETS.basic;
     styleInput.value = STYLE_PRESETS.tutor;
     updateCounter();
 
@@ -583,7 +622,7 @@ function buildHtml() {
     function showError(title, msg, details) {
       latestErrorData = { title, msg, details };
       const card = document.getElementById("errorCard");
-      document.getElementById("errorTitle").innerText = "⚠️️ " + title;
+      document.getElementById("errorTitle").innerText = "⚠️ " + title;
       document.getElementById("errorMsgText").innerText = msg;
       document.getElementById("errorDetailsText").innerText = typeof details === "object" ? JSON.stringify(details, null, 2) : String(details);
       card.style.display = "flex";
