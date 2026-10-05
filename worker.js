@@ -6,8 +6,8 @@ export default {
     if (url.pathname === "/api/tts" && request.method === "POST") {
       const startTime = Date.now();
       try {
-        const apiKey = env.GEMINI_API_KEY;
-        if (!apiKey) {
+        const rawKeyConfig = env.GEMINI_API_KEY;
+        if (!rawKeyConfig) {
           return new Response(JSON.stringify({
             error: "未设置环境变量 GEMINI_API_KEY",
             details: {
@@ -20,6 +20,9 @@ export default {
             headers: { "Content-Type": "application/json; charset=utf-8" }
           });
         }
+
+        // 支持单个 Key 或逗号分隔的多 Key 轮询池 (Key1,Key2,Key3)
+        const apiKeys = rawKeyConfig.split(",").map(k => k.trim()).filter(Boolean);
 
         const body = await request.json().catch(() => ({}));
         const {
@@ -43,17 +46,16 @@ export default {
           });
         }
 
-        // 规整文本标点
+        // 标点规整
         const cleanText = text
           .replace(/……/g, "，")
           .replace(/…/g, "，")
           .trim();
 
-        // 组装最终 Style 指令
         const finalStyle = buildFinalStyle(stylePrompt, speed);
 
         // 构造边缘缓存 Key
-        const cachePayload = `${cleanText}_${voice}_${finalStyle}_v2`;
+        const cachePayload = `${cleanText}_${voice}_${finalStyle}_v3`;
         const hashBuf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(cachePayload));
         const hashHex = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, "0")).join("");
         const cache = caches.default;
@@ -68,7 +70,6 @@ export default {
           }
         } catch (_) {}
 
-        // 官方 Transcript 与 Style 结构
         const payload = {
           contents: [
             {
@@ -93,27 +94,55 @@ export default {
           }
         };
 
-        const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash-tts:generateContent?key=${apiKey}`;
-        const response = await fetch(targetUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
+        let lastResponse = null;
+        let lastErrText = "";
+        let successfulKeyIndex = -1;
 
-        if (!response.ok) {
-          const errDetail = await response.text();
-          let parsedError = null;
-          try {
-            parsedError = JSON.parse(errDetail);
-          } catch (_) {
-            parsedError = { raw: errDetail };
+        // 多 Key 循环容灾重试：遇到 429 自动切换下一个 Key
+        for (let i = 0; i < apiKeys.length; i++) {
+          const currentKey = apiKeys[i];
+          const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash-tts:generateContent?key=${currentKey}`;
+
+          const res = await fetch(targetUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+
+          if (res.ok) {
+            lastResponse = res;
+            successfulKeyIndex = i;
+            break;
           }
 
+          lastErrText = await res.text();
+          lastResponse = res;
+
+          // 若非 429 错误（如 400 格式错误），直接终止重试并返回错误
+          if (res.status !== 429) {
+            break;
+          }
+        }
+
+        if (!lastResponse || !lastResponse.ok) {
+          let parsedError = null;
+          try {
+            parsedError = JSON.parse(lastErrText);
+          } catch (_) {
+            parsedError = { raw: lastErrText };
+          }
+
+          const isQuota = lastResponse?.status === 429;
+          const userHint = isQuota 
+            ? `Google API 429 免费额度耗尽（已尝试 ${apiKeys.length} 个密钥）。请在控制台填入更多免费 Key，或绑定结算账号开启付费。`
+            : `Google API 请求失败 (${lastResponse?.status})`;
+
           return new Response(JSON.stringify({
-            error: `Google API 请求失败 (${response.status})`,
+            error: userHint,
             details: {
-              status: response.status,
-              statusText: response.statusText,
+              status: lastResponse?.status,
+              statusText: lastResponse?.statusText,
+              triedKeysCount: apiKeys.length,
               durationMs: Date.now() - startTime,
               googleResponse: parsedError,
               requestMeta: {
@@ -124,12 +153,12 @@ export default {
               timestamp: new Date().toISOString()
             }
           }), {
-            status: response.status,
+            status: lastResponse ? lastResponse.status : 500,
             headers: { "Content-Type": "application/json; charset=utf-8" }
           });
         }
 
-        const resData = await response.json();
+        const resData = await lastResponse.json();
         const candidate = resData.candidates?.[0];
         const inlineData = candidate?.content?.parts?.[0]?.inlineData;
 
@@ -137,7 +166,6 @@ export default {
           return new Response(JSON.stringify({
             error: "Google API 未返回有效音频数据",
             details: {
-              candidateSummary: candidate ? "存在候选但无内联音频" : "无有效候选结果",
               apiFullResponse: resData,
               timestamp: new Date().toISOString()
             }
@@ -147,7 +175,7 @@ export default {
           });
         }
 
-        // 解码 Base64 PCM 原始数据
+        // 解码 Base64 PCM
         const binaryString = atob(inlineData.data);
         const len = binaryString.length;
         const rawPcmBytes = new Uint8Array(len);
@@ -155,21 +183,20 @@ export default {
           rawPcmBytes[i] = binaryString.charCodeAt(i);
         }
 
-        // 解析采样率与采样位深
         const mimeType = inlineData.mimeType || "audio/L16;rate=24000";
         const { sampleRate, bitsPerSample } = parseAudioMimeType(mimeType);
 
-        // 进行音频净化：对齐字节、消除尾部截断爆音并注入静音缓冲垫
+        // 滤波平滑：消除硬截断爆音与补齐 300ms 纯净静音缓冲
         const sanitizedPcmBytes = sanitizePcmAudio(rawPcmBytes, sampleRate);
 
-        // 构造标准 WAV 文件
         const wavBuffer = convertToWav(sanitizedPcmBytes, sampleRate, bitsPerSample);
 
         const finalHeaders = {
           "Content-Type": "audio/wav",
           "Content-Disposition": 'attachment; filename="vocab.wav"',
           "Cache-Control": "public, max-age=604800",
-          "X-Cache-Status": "MISS"
+          "X-Cache-Status": "MISS",
+          "X-Key-Index": String(successfulKeyIndex)
         };
 
         const resultResponse = new Response(wavBuffer, { headers: finalHeaders });
@@ -201,9 +228,7 @@ export default {
   }
 };
 
-// 音频平滑去噪与防爆音处理器
 function sanitizePcmAudio(pcmBytes, sampleRate) {
-  // 1. 严格对齐 16 位采样点（每点 2 字节），丢弃末尾孤立字节
   let byteLen = pcmBytes.length;
   if (byteLen % 2 !== 0) {
     byteLen -= 1;
@@ -213,27 +238,23 @@ function sanitizePcmAudio(pcmBytes, sampleRate) {
   const sampleCount = byteLen / 2;
   const samples = new Int16Array(pcmBytes.buffer, pcmBytes.byteOffset, sampleCount);
 
-  // 2. 尾部平滑余弦淡出（Fade Out）：消除直流偏置与硬截断
-  const fadeSeconds = 0.06; // 60 毫秒淡出
+  // 60ms 余弦平滑淡出
+  const fadeSeconds = 0.06;
   const fadeSamples = Math.min(Math.floor(sampleRate * fadeSeconds), sampleCount);
   const fadeStartIndex = sampleCount - fadeSamples;
 
   for (let i = 0; i < fadeSamples; i++) {
-    // 余弦淡出增益平滑曲线 (1.0 -> 0.0)
     const factor = 0.5 * (1 + Math.cos((Math.PI * i) / fadeSamples));
     samples[fadeStartIndex + i] = Math.round(samples[fadeStartIndex + i] * factor);
   }
 
-  // 3. 追加 300 毫秒的纯净静音缓冲垫（Silence Padding）
-  // 让扬声器在无声状态下平稳自然结束，杜绝 DAC 关断产生的刺激电平杂音
-  const silenceSeconds = 0.3; // 300ms
+  // 300ms 静音缓冲垫
+  const silenceSeconds = 0.3;
   const silenceSamples = Math.floor(sampleRate * silenceSeconds);
   const totalSampleCount = sampleCount + silenceSamples;
 
   const paddedBuffer = new ArrayBuffer(totalSampleCount * 2);
   const paddedSamples = new Int16Array(paddedBuffer);
-
-  // 写入已淡出的有效采样，剩余采样自动为 0（静音）
   paddedSamples.set(samples, 0);
 
   return new Uint8Array(paddedBuffer);
@@ -248,14 +269,10 @@ function parseAudioMimeType(mimeType) {
     param = param.trim();
     if (param.toLowerCase().startsWith("rate=")) {
       const match = param.match(/rate=(\d+)/i);
-      if (match) {
-        sampleRate = parseInt(match[1], 10);
-      }
+      if (match) sampleRate = parseInt(match[1], 10);
     } else if (param.startsWith("audio/L")) {
       const match = param.match(/audio\/L(\d+)/i);
-      if (match) {
-        bitsPerSample = parseInt(match[1], 10);
-      }
+      if (match) bitsPerSample = parseInt(match[1], 10);
     }
   }
   return { sampleRate, bitsPerSample };
@@ -545,7 +562,7 @@ function buildHtml() {
     </div>
 
     <div class="footer-note">
-      内置 60ms 余弦淡出与 300ms 纯净静音缓冲，彻底消除末尾刺激性爆破杂音
+      支持多 API Key 自动容灾轮询 · 60ms 余弦淡出与静音缓冲消除尾部爆破音
     </div>
   </div>
 
