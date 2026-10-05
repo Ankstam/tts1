@@ -43,7 +43,7 @@ export default {
           });
         }
 
-        // 标点规整（保护模型断句与停顿）
+        // 规整文本标点
         const cleanText = text
           .replace(/……/g, "，")
           .replace(/…/g, "，")
@@ -68,26 +68,26 @@ export default {
           }
         } catch (_) {}
 
-        // 对齐 Gemini 3.8 Flash TTS 官方规范
+        // 对齐官方 Python SDK 的完整结构与 Transcript 标记
         const payload = {
           contents: [
             {
               role: "user",
               parts: [
                 {
-                  text: cleanText,
-                  speechMetadata: {
-                    style: finalStyle
-                  }
+                  text: `## Transcript:\n[Style: ${finalStyle}]\n\n${cleanText}`
                 }
               ]
             }
           ],
           generationConfig: {
-            responseModalities: ["AUDIO"],
+            temperature: 1,
+            responseModalities: ["audio"],
             speechConfig: {
               voiceConfig: {
-                voice: voice
+                prebuiltVoiceConfig: {
+                  voiceName: voice
+                }
               }
             }
           }
@@ -147,13 +147,20 @@ export default {
           });
         }
 
-        // 解码 Base64 WAV
+        // 解码 Base64 原始 PCM 字节流
         const binaryString = atob(inlineData.data);
         const len = binaryString.length;
-        const wavBytes = new Uint8Array(len);
+        const pcmBytes = new Uint8Array(len);
         for (let i = 0; i < len; i++) {
-          wavBytes[i] = binaryString.charCodeAt(i);
+          pcmBytes[i] = binaryString.charCodeAt(i);
         }
+
+        // 解析音频采样率与量化位数（严格对齐官方 parse_audio_mime_type）
+        const mimeType = inlineData.mimeType || "audio/L16;rate=24000";
+        const { sampleRate, bitsPerSample } = parseAudioMimeType(mimeType);
+
+        // 构造标准 WAV 头部（严格对齐官方 convert_to_wav）
+        const wavBuffer = convertToWav(pcmBytes, sampleRate, bitsPerSample);
 
         const finalHeaders = {
           "Content-Type": "audio/wav",
@@ -162,9 +169,9 @@ export default {
           "X-Cache-Status": "MISS"
         };
 
-        const resultResponse = new Response(wavBytes, { headers: finalHeaders });
+        const resultResponse = new Response(wavBuffer, { headers: finalHeaders });
         try {
-          await cache.put(cacheUrl, new Response(wavBytes, { headers: finalHeaders }));
+          await cache.put(cacheUrl, new Response(wavBuffer, { headers: finalHeaders }));
         } catch (_) {}
 
         return resultResponse;
@@ -191,10 +198,69 @@ export default {
   }
 };
 
+// 解析 MIME 类型参数（严格对齐官方 parse_audio_mime_type）
+function parseAudioMimeType(mimeType) {
+  let sampleRate = 24000;
+  let bitsPerSample = 16;
+
+  const parts = mimeType.split(";");
+  for (let param of parts) {
+    param = param.trim();
+    if (param.toLowerCase().startsWith("rate=")) {
+      const match = param.match(/rate=(\d+)/i);
+      if (match) {
+        sampleRate = parseInt(match[1], 10);
+      }
+    } else if (param.startsWith("audio/L")) {
+      const match = param.match(/audio\/L(\d+)/i);
+      if (match) {
+        bitsPerSample = parseInt(match[1], 10);
+      }
+    }
+  }
+  return { sampleRate, bitsPerSample };
+}
+
+// 构造 44 字节标准 RIFF WAV 头部（严格对齐官方 convert_to_wav）
+function convertToWav(audioData, sampleRate, bitsPerSample) {
+  const numChannels = 1;
+  const bytesPerSample = bitsPerSample / 8;
+  const blockAlign = numChannels * bytesPerSample;
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = audioData.length;
+  const chunkSize = 36 + dataSize;
+
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  function writeString(offset, str) {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  }
+
+  writeString(0, "RIFF");
+  view.setUint32(4, chunkSize, true);
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM = 1
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+  writeString(36, "data");
+  view.setUint32(40, dataSize, true);
+
+  new Uint8Array(buffer, 44).set(audioData);
+  return buffer;
+}
+
 function buildFinalStyle(customStyle, speed) {
   let base = (customStyle || "").trim();
   if (!base) {
-    base = "Professional Japanese tutor. Calm and educational pacing. Authentic standard Tokyo pitch accent, 1 second pause between words and Chinese translations.";
+    base = "Professional Japanese tutor. Speak with a calm and educational tone. Authentic standard Tokyo pitch accent, 1 second pause between words and Chinese translations.";
   }
 
   if (speed === "slow") {
@@ -288,7 +354,6 @@ function buildHtml() {
     .preset-chips::-webkit-scrollbar { display: none; }
     .chip { background: var(--surface); color: var(--text-muted); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size: 0.72rem; white-space: nowrap; cursor: pointer; }
 
-    /* 独立报错与诊断面板 */
     .error-card {
       display: none; flex-direction: column; gap: 8px;
       background: rgba(239, 68, 68, 0.1); border: 1px solid var(--danger);
@@ -418,7 +483,6 @@ function buildHtml() {
 
       <button id="runBtn" class="btn-submit" onclick="generateAudio()">开始合成朗读</button>
 
-      <!-- 诊断与报错详情面板 -->
       <div class="error-card" id="errorCard">
         <div class="error-header">
           <span id="errorTitle">⚠️ 合成异常</span>
@@ -428,7 +492,6 @@ function buildHtml() {
         <pre class="error-details" id="errorDetailsText"></pre>
       </div>
 
-      <!-- 播放器区域 -->
       <div class="player-card" id="playerCard">
         <audio id="audioPlayer" controls></audio>
         <div class="player-actions">
@@ -443,7 +506,7 @@ function buildHtml() {
     </div>
 
     <div class="footer-note">
-      已解除字符数量限制 · 遇错自动捕获底层 Google 状态码并输出诊断日志
+      已对齐 Google 官方 convert_to_wav 与 PrebuiltVoiceConfig 规范
     </div>
   </div>
 
@@ -495,7 +558,7 @@ function buildHtml() {
       const start = textarea.selectionStart;
       const end = textarea.selectionEnd;
       const val = textarea.value;
-            textarea.value = val.substring(0, start) + tag + val.substring(end);
+      textarea.value = val.substring(0, start) + tag + val.substring(end);
       textarea.selectionStart = textarea.selectionEnd = start + tag.length;
       textarea.focus();
       updateCounter();
@@ -520,7 +583,7 @@ function buildHtml() {
     function showError(title, msg, details) {
       latestErrorData = { title, msg, details };
       const card = document.getElementById("errorCard");
-      document.getElementById("errorTitle").innerText = "⚠️ " + title;
+      document.getElementById("errorTitle").innerText = "⚠️️ " + title;
       document.getElementById("errorMsgText").innerText = msg;
       document.getElementById("errorDetailsText").innerText = typeof details === "object" ? JSON.stringify(details, null, 2) : String(details);
       card.style.display = "flex";
