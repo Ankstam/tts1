@@ -28,14 +28,17 @@ export default {
           "pause naturally for 1 second, then pronounce the Chinese translation in a clear and standard Mandarin accent. " +
           "Keep a consistent educational pacing.";
 
-        // 单说话人标准配置
+        // 对齐 Gemini 3.8 Flash TTS 严格的双说话人规范要求
         const payload = {
           contents: [
             {
               role: "user",
               parts: [
                 {
-                  text: `[Style: ${styleInstruction}]\n\n${text}`
+                  text: `[Style: ${styleInstruction}]\n\n${text}`,
+                  speechMetadata: {
+                    speaker: "Speaker 1"
+                  }
                 }
               ]
             }
@@ -44,16 +47,32 @@ export default {
             temperature: 0.3,
             responseModalities: ["audio"],
             speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: {
-                  voiceName: voice
-                }
+              multiSpeakerVoiceConfig: {
+                speakerVoiceConfigs: [
+                  {
+                    speaker: "Speaker 1",
+                    voiceConfig: {
+                      prebuiltVoiceConfig: {
+                        voiceName: voice
+                      }
+                    }
+                  },
+                  {
+                    speaker: "Speaker 2",
+                    voiceConfig: {
+                      prebuiltVoiceConfig: {
+                        // 补齐第 2 个说话人配置以满足 API 校验
+                        voiceName: voice === "Rami" ? "Fola" : "Rami"
+                      }
+                    }
+                  }
+                ]
               }
             }
           }
         };
 
-        const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`;
+        const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash-tts:generateContent?key=${apiKey}`;
         const response = await fetch(targetUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -94,7 +113,7 @@ export default {
           if (match) sampleRate = parseInt(match[1], 10);
         }
 
-        // 打包标准 WAV 44 字节头
+        // 构造标准 WAV 44 字节头
         const wavBuffer = buildWav(pcmBytes, sampleRate);
 
         return new Response(wavBuffer, {
@@ -113,7 +132,7 @@ export default {
       }
     }
 
-    // 2. 访问首页时渲染手机端专用前端界面
+    // 2. 访问首页时渲染前端界面
     return new Response(buildHtml(), {
       headers: { "Content-Type": "text/html; charset=utf-8" }
     });
@@ -186,14 +205,16 @@ function buildHtml() {
   <div class="box">
     <div class="title-row">
       <span class="title">日语单词跟读助教</span>
-      <span class="tag">Gemini TTS</span>
+      <span class="tag">Gemini 3.8 Flash TTS</span>
     </div>
 
     <div class="bar">
       <select id="voiceSelect">
         <option value="Fola" selected>声音: Fola (清晰标准女声)</option>
         <option value="Rami">声音: Rami (温和沉稳男声)</option>
-        <option value="Porena">声音: Porena (活泼女声)</option>
+        <option value="Lumi">声音: Lumi (亲切自然女声)</option>
+        <option value="Bodi">声音: Bodi (低沉柔和男声)</option>
+        <option value="Koda">声音: Koda (专业解说男声)</option>
       </select>
       <button class="btn-clear" onclick="clearText()">清空</button>
     </div>
