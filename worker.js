@@ -2,7 +2,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // 路由 1：处理前端 TTS 生成请求
+    // 路由 1：处理 TTS 请求
     if (url.pathname === "/api/tts" && request.method === "POST") {
       try {
         const { text, voice = "Fola" } = await request.json();
@@ -22,7 +22,6 @@ export default {
           });
         }
 
-        // 固化专业日语教学与中日跟读节奏提示词
         const stylePrompt =
           "Act as a professional language teacher. Speak with a clear, steady, and calm tone. " +
           "Pronounce Japanese words slowly with authentic standard Tokyo pitch accent, " +
@@ -75,7 +74,6 @@ export default {
           });
         }
 
-        // Base64 PCM 解码并封装 44 字节 WAV 头部
         const binaryStr = atob(inlineData.data);
         const pcmBytes = new Uint8Array(binaryStr.length);
         for (let i = 0; i < binaryStr.length; i++) {
@@ -105,14 +103,13 @@ export default {
       }
     }
 
-    // 路由 2：渲染专为手机端优化的简约全功能网页
+    // 路由 2：渲染网页
     return new Response(renderHtml(), {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   },
 };
 
-// PCM 裸流打包为标准 RIFF/WAV 格式
 function addWavHeader(rawAudio, sampleRate) {
   const numChannels = 1;
   const bitsPerSample = 16;
@@ -146,7 +143,6 @@ function addWavHeader(rawAudio, sampleRate) {
   return buffer;
 }
 
-// 简约前端 HTML 界面
 function renderHtml() {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -167,7 +163,7 @@ function renderHtml() {
     .btn-clear { background: #334155; color: #cbd5e1; border: none; padding: 0 12px; border-radius: 8px; font-size: 0.85rem; cursor: pointer; }
     textarea { width: 100%; height: 260px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #f1f5f9; padding: 12px; font-size: 0.95rem; line-height: 1.6; resize: none; outline: none; font-family: inherit; }
     textarea:focus { border-color: #38bdf8; }
-    .btn-run { width: 100%; background: #0284c7; color: #ffffff; border: none; padding: 13px; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: opacity 0.2s; display: flex; justify-content: center; align-items: center; gap: 8px; }
+    .btn-run { width: 100%; background: #0284c7; color: #ffffff; border: none; padding: 13px; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; display: flex; justify-content: center; align-items: center; gap: 8px; }
     .btn-run:disabled { opacity: 0.5; cursor: not-allowed; }
     .audio-panel { display: none; flex-direction: column; gap: 10px; margin-top: 6px; }
     audio { width: 100%; height: 42px; border-radius: 8px; }
@@ -213,7 +209,6 @@ function renderHtml() {
   </div>
 
   <script>
-    // 默认载入示例
     document.getElementById("textInput").value = "いま…… 现在。\\nじ…… 点。\\nふん…… 分。\\nなんじ…… 几点。\\nおきます…… 起床。\\nねます…… 睡觉。";
 
     function clearInput() {
