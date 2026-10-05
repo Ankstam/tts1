@@ -495,4 +495,112 @@ function buildHtml() {
       const start = textarea.selectionStart;
       const end = textarea.selectionEnd;
       const val = textarea.value;
-      tex
+            textarea.value = val.substring(0, start) + tag + val.substring(end);
+      textarea.selectionStart = textarea.selectionEnd = start + tag.length;
+      textarea.focus();
+      updateCounter();
+    }
+
+    function loadText(type) {
+      if (type === "clear") {
+        textarea.value = "";
+      } else {
+        textarea.value = TEXT_PRESETS[type] || "";
+      }
+      updateCounter();
+      textarea.focus();
+    }
+
+    function setSpeed(rate, btn) {
+      player.playbackRate = rate;
+      document.querySelectorAll(".speed-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+    }
+
+    function showError(title, msg, details) {
+      latestErrorData = { title, msg, details };
+      const card = document.getElementById("errorCard");
+      document.getElementById("errorTitle").innerText = "⚠️ " + title;
+      document.getElementById("errorMsgText").innerText = msg;
+      document.getElementById("errorDetailsText").innerText = typeof details === "object" ? JSON.stringify(details, null, 2) : String(details);
+      card.style.display = "flex";
+    }
+
+    function clearError() {
+      latestErrorData = null;
+      document.getElementById("errorCard").style.display = "none";
+    }
+
+    function copyErrorLog() {
+      if (!latestErrorData) return;
+      const logText = "【TTS 报错诊断日志】\\n标题: " + latestErrorData.title + "\\n信息: " + latestErrorData.msg + "\\n详情:\\n" + JSON.stringify(latestErrorData.details, null, 2);
+      navigator.clipboard.writeText(logText).then(() => {
+        alert("诊断日志已复制到剪贴板！");
+      }).catch(() => {
+        alert("复制失败，请手动在下方控制台中复制。");
+      });
+    }
+
+    async function generateAudio() {
+      const text = textarea.value.trim();
+      const voice = document.getElementById("voiceSelect").value;
+      const stylePrompt = styleInput.value.trim();
+      const speed = document.getElementById("speedSelect").value;
+      const btn = document.getElementById("runBtn");
+      const playerCard = document.getElementById("playerCard");
+      const dl = document.getElementById("downloadBtn");
+
+      if (!text) {
+        alert("请输入待朗读的内容！");
+        return;
+      }
+
+      clearError();
+      btn.disabled = true;
+      let secs = 0;
+      btn.innerText = "正在合成音频 (0s)...";
+      timer = setInterval(() => {
+        secs++;
+        btn.innerText = "正在合成音频 (" + secs + "s)...";
+      }, 1000);
+
+      try {
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, voice, stylePrompt, speed })
+        });
+
+        if (!res.ok) {
+          const errJson = await res.json().catch(async () => {
+            const raw = await res.text().catch(() => "无法读取响应体");
+            return { error: "HTTP " + res.status + " 响应解析失败", details: raw };
+          });
+          showError("合成接口返回异常 (" + res.status + ")", errJson.error || "未知请求错误", errJson.details || errJson);
+          return;
+        }
+
+        const blob = await res.blob();
+        const blobUrl = URL.createObjectURL(blob);
+
+        player.src = blobUrl;
+        dl.href = blobUrl;
+        const now = new Date();
+        const timeTag = now.toISOString().slice(0, 10).replace(/-/g, "") + "_" + now.getHours() + now.getMinutes();
+        dl.download = "japanese_vocab_" + timeTag + ".wav";
+
+        playerCard.style.display = "flex";
+        player.play().catch(() => {});
+
+      } catch (err) {
+        showError("网络/脚本执行异常", err.message, { stack: err.stack });
+      } finally {
+        clearInterval(timer);
+        btn.disabled = false;
+        btn.innerText = "开始合成朗读";
+      }
+    }
+  </script>
+</body>
+</html>`;
+}
