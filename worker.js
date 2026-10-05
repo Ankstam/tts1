@@ -21,52 +21,35 @@ export default {
           });
         }
 
-        // 专业日语教学提示词
-        const styleInstruction = 
-          "Act as a professional language teacher. Speak with a clear, steady, and calm tone. " +
-          "Pronounce Japanese words slowly with authentic standard Tokyo pitch accent, " +
-          "pause naturally for 1 second, then pronounce the Chinese translation in a clear and standard Mandarin accent. " +
-          "Keep a consistent educational pacing.";
+        // 将长省略号规整为标点逗号，防止 TTS 模型出现异常长停顿或截断
+        const cleanText = text.replace(/……/g, "，");
 
-        // 对齐 Gemini 3.8 Flash TTS 严格的双说话人规范要求
+        // 教学风格指令直接放入独立的元数据字段，不污染朗读文本
+        const styleInstruction = 
+          "Professional language teacher. Clear, steady, and calm tone. " +
+          "Pronounce Japanese words slowly with authentic standard Tokyo pitch accent, " +
+          "pause for 1 second, then pronounce the Chinese translation in clear standard Mandarin.";
+
+        // 对齐 Gemini 3.8 Flash TTS 官方单说话人标准接口
         const payload = {
           contents: [
             {
               role: "user",
               parts: [
                 {
-                  text: `[Style: ${styleInstruction}]\n\n${text}`,
+                  text: cleanText,
                   speechMetadata: {
-                    speaker: "Speaker 1"
+                    style: styleInstruction
                   }
                 }
               ]
             }
           ],
           generationConfig: {
-            temperature: 0.3,
-            responseModalities: ["audio"],
+            responseModalities: ["AUDIO"],
             speechConfig: {
-              multiSpeakerVoiceConfig: {
-                speakerVoiceConfigs: [
-                  {
-                    speaker: "Speaker 1",
-                    voiceConfig: {
-                      prebuiltVoiceConfig: {
-                        voiceName: voice
-                      }
-                    }
-                  },
-                  {
-                    speaker: "Speaker 2",
-                    voiceConfig: {
-                      prebuiltVoiceConfig: {
-                        // 补齐第 2 个说话人配置以满足 API 校验
-                        voiceName: voice === "Rami" ? "Fola" : "Rami"
-                      }
-                    }
-                  }
-                ]
+              voiceConfig: {
+                voice: voice
               }
             }
           }
@@ -98,25 +81,15 @@ export default {
           });
         }
 
-        // 解码 Base64 PCM 裸流
+        // Gemini 3.8 Flash TTS 返回的数据本身已是完整 WAV 文件，直接解码下发即可，绝不能再次添加 WAV 头
         const binaryString = atob(inlineData.data);
-        const pcmLength = binaryString.length;
-        const pcmBytes = new Uint8Array(pcmLength);
-        for (let i = 0; i < pcmLength; i++) {
-          pcmBytes[i] = binaryString.charCodeAt(i);
+        const len = binaryString.length;
+        const wavBytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+          wavBytes[i] = binaryString.charCodeAt(i);
         }
 
-        // 解析采样率（默认为 24000）
-        let sampleRate = 24000;
-        if (inlineData.mimeType && inlineData.mimeType.includes("rate=")) {
-          const match = inlineData.mimeType.match(/rate=(\d+)/);
-          if (match) sampleRate = parseInt(match[1], 10);
-        }
-
-        // 构造标准 WAV 44 字节头
-        const wavBuffer = buildWav(pcmBytes, sampleRate);
-
-        return new Response(wavBuffer, {
+        return new Response(wavBytes, {
           headers: {
             "Content-Type": "audio/wav",
             "Content-Disposition": 'attachment; filename="vocab.wav"',
@@ -138,40 +111,6 @@ export default {
     });
   }
 };
-
-// 构造 44 字节标准 RIFF WAV 头部
-function buildWav(pcmData, sampleRate) {
-  const numChannels = 1;
-  const bitsPerSample = 16;
-  const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
-  const blockAlign = numChannels * (bitsPerSample / 8);
-  const dataSize = pcmData.length;
-  const buffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(buffer);
-
-  function writeString(offset, str) {
-    for (let i = 0; i < str.length; i++) {
-      view.setUint8(offset + i, str.charCodeAt(i));
-    }
-  }
-
-  writeString(0, "RIFF");
-  view.setUint32(4, 36 + dataSize, true);
-  writeString(8, "WAVE");
-  writeString(12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, numChannels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, byteRate, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, bitsPerSample, true);
-  writeString(36, "data");
-  view.setUint32(40, dataSize, true);
-
-  new Uint8Array(buffer, 44).set(pcmData);
-  return buffer;
-}
 
 // 移动端全屏前端界面
 function buildHtml() {
